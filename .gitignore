@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 pdfs_prueba/*.pdf
+pdfs_prueba/*.docx

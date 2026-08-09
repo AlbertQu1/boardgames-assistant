@@ -11,6 +11,7 @@ import os
 
 import psycopg2
 from dotenv import load_dotenv
+from docx import Document as DocxDocument
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 
@@ -22,8 +23,15 @@ load_dotenv()
 
 
 def extract_text(pdf_path: str) -> str:
-    reader = PdfReader(pdf_path)
-    return "\n".join(page.extract_text() or "" for page in reader.pages)
+    ext = os.path.splitext(pdf_path)[1].lower()
+    if ext == ".pdf":
+        reader = PdfReader(pdf_path)
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+    elif ext == ".docx":
+        doc = DocxDocument(pdf_path)
+        return "\n".join(p.text for p in doc.paragraphs)
+    else:
+        raise ValueError(f"Formato no soportado: {ext} (solo .pdf y .docx)")
 
 
 def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:

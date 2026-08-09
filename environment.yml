@@ -9,5 +9,9 @@ dependencies:
       - psycopg2-binary
       - pgvector
       - pypdf
+      - python-docx
       - sentence-transformers
       - python-dotenv
+      - fastapi
+      - uvicorn[standard]
+      - google-genai
