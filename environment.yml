@@ -1,0 +1,13 @@
+name: boardgames
+channels:
+  - defaults
+dependencies:
+  - python=3.13
+  - numpy
+  - pip
+  - pip:
+      - psycopg2-binary
+      - pgvector
+      - pypdf
+      - sentence-transformers
+      - python-dotenv
