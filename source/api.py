@@ -8,6 +8,7 @@ Uso:
 """
 
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -36,6 +37,7 @@ import psycopg2
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
@@ -84,8 +86,15 @@ TOOLS = types.Tool(
                 "Tablas disponibles (schema bgstats):\n"
                 "- bgstats.juegos(uuid, nombre, bgg_id, bgg_nombre, bgg_year, es_expansion, es_base, "
                 "designers, min_jugadores, max_jugadores, min_duracion_min, max_duracion_min, cooperativo, "
-                "rating, veces_jugado_previo)\n"
-                "- bgstats.jugadores(uuid, nombre, es_anonimo)\n"
+                "rating, veces_jugado_previo, es_propio — si lo tiene en su coleccion actualmente)\n"
+                "- bgstats.colecciones(uuid, juego_uuid, version_name, status_owned, status_prev_owned, "
+                "status_for_trade, status_want_to_buy, status_want_to_play, status_wishlist, "
+                "acquired_from — donde/de quien lo consiguio, texto libre con variantes de escritura, "
+                "acquisition_date, inventory_location — donde lo guarda, no donde lo compro, "
+                "price_paid, price_paid_currency, rating, quantity) — una fila por copia fisica de un "
+                "juego; usar para preguntas de cuanto ha gastado, en donde suele comprar, que tiene en "
+                "wishlist, que ya no tiene (status_owned=false AND status_prev_owned=true)\n"
+                "- bgstats.jugadores(uuid, nombre, es_anonimo, bgg_username)\n"
                 "- bgstats.lugares(uuid, nombre, lat, lon, direccion_referencia) — lat/lon puede ser NULL, "
                 "no todos los lugares tienen coordenadas todavia\n"
                 "- bgstats.partidas(uuid, juego_uuid, lugar_uuid, fecha, duracion_min, comentarios, "
@@ -272,8 +281,21 @@ def reglamentos_pendientes():
     )
 
 
+@app.get("/reglamentos/pendientes/{archivo_nombre}/archivo")
+def ver_pendiente(archivo_nombre: str):
+    if os.path.basename(archivo_nombre) != archivo_nombre:
+        raise HTTPException(status_code=400, detail="Nombre de archivo invalido.")
+    ruta = os.path.join(PENDIENTES_DIR, archivo_nombre)
+    if not os.path.isfile(ruta):
+        raise HTTPException(status_code=404, detail=f"No existe {archivo_nombre} en pendientes.")
+    media_type = mimetypes.guess_type(ruta)[0] or "application/octet-stream"
+    return FileResponse(ruta, media_type=media_type, filename=archivo_nombre, content_disposition_type="inline")
+
+
 @app.delete("/reglamentos/pendientes/{archivo_nombre}")
 def descartar_pendiente(archivo_nombre: str):
+    if os.path.basename(archivo_nombre) != archivo_nombre:
+        raise HTTPException(status_code=400, detail="Nombre de archivo invalido.")
     ruta = os.path.join(PENDIENTES_DIR, archivo_nombre)
     if not os.path.exists(ruta):
         raise HTTPException(status_code=404, detail=f"No existe {archivo_nombre} en pendientes.")
@@ -289,6 +311,8 @@ def confirmar_reglamento(
     doc_type: str = Form("reglamento"),
     juego_base: str | None = Form(None),
 ):
+    if os.path.basename(archivo_nombre) != archivo_nombre:
+        raise HTTPException(status_code=400, detail="Nombre de archivo invalido.")
     origen = os.path.join(PENDIENTES_DIR, archivo_nombre)
     if not os.path.exists(origen):
         raise HTTPException(status_code=404, detail=f"No existe {archivo_nombre} en pendientes.")
