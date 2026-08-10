@@ -87,6 +87,13 @@ def cargar_alias_compra(cur) -> dict:
     return {alias: (canonica, lugar_uuid) for alias, canonica, lugar_uuid in cur.fetchall()}
 
 
+def cargar_categoria_compra(cur) -> dict:
+    """Clasificacion manual de cada fuente_compra canonica (en_linea/amigos/regalo/
+    viaje/tienda_fisica), para poder agrupar el gasto por tipo de compra."""
+    cur.execute("SELECT fuente_canonica, categoria FROM bgstats.fuentes_compra_categoria")
+    return dict(cur.fetchall())
+
+
 def cargar_moneda_override(cur) -> dict:
     """Copias donde price_paid_currency del export es ambiguo (ej. "otro") y se
     confirmo manualmente cual era la moneda real. Ver bgstats.colecciones_moneda_override.
@@ -187,6 +194,7 @@ def sync(path: str) -> dict:
     # colecciones (una fila por copia fisica de un juego: precio, origen, estado)
     alias_compra = cargar_alias_compra(cur)
     moneda_override = cargar_moneda_override(cur)
+    categoria_compra_por_fuente = cargar_categoria_compra(cur)
     cur.execute("SELECT nombre, uuid FROM bgstats.lugares")
     lugares_por_nombre = {nombre.strip().lower(): uuid for nombre, uuid in cur.fetchall()}
     fx_cache: dict = {}
@@ -208,6 +216,7 @@ def sync(path: str) -> dict:
             )
             if acquired_from_raw and not reconocido:
                 fuentes_sin_normalizar.add(acquired_from_raw.strip())
+            categoria_compra = categoria_compra_por_fuente.get(fuente_compra) if fuente_compra else None
 
             acquisition_date = parse_date(md.get("AcquisitionDate"))
             inventory_date = parse_date(md.get("InventoryDate"))
@@ -227,9 +236,9 @@ def sync(path: str) -> dict:
                      inventory_location, inventory_date, price_paid, price_paid_currency,
                      current_price, current_price_currency, rating, quantity, metadata_extra,
                      modification_date, fuente_compra, lugar_compra_uuid, price_paid_mxn,
-                     fx_rate_usada, fx_fecha_usada)
+                     fx_rate_usada, fx_fecha_usada, categoria_compra)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s)
+                        %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (uuid) DO UPDATE SET
                     juego_uuid = EXCLUDED.juego_uuid, version_name = EXCLUDED.version_name,
                     year = EXCLUDED.year, status_owned = EXCLUDED.status_owned,
@@ -246,7 +255,7 @@ def sync(path: str) -> dict:
                     metadata_extra = EXCLUDED.metadata_extra, modification_date = EXCLUDED.modification_date,
                     fuente_compra = EXCLUDED.fuente_compra, lugar_compra_uuid = EXCLUDED.lugar_compra_uuid,
                     price_paid_mxn = EXCLUDED.price_paid_mxn, fx_rate_usada = EXCLUDED.fx_rate_usada,
-                    fx_fecha_usada = EXCLUDED.fx_fecha_usada
+                    fx_fecha_usada = EXCLUDED.fx_fecha_usada, categoria_compra = EXCLUDED.categoria_compra
                 """,
                 (
                     copia["uuid"], juego_uuid, copia.get("versionName"), copia.get("year"),
@@ -261,6 +270,7 @@ def sync(path: str) -> dict:
                     parse_float(md.get("Rating")), parse_int(md.get("Quantity")),
                     json.dumps(extra), copia.get("modificationDate"),
                     fuente_compra, lugar_compra_uuid, price_paid_mxn, fx_rate_usada, fx_fecha_usada,
+                    categoria_compra,
                 ),
             )
 
