@@ -48,6 +48,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import params
 from source.query_test import search
 from source.bgstats_sync import sync as bgstats_sync
+from source.calendario_sync import sync as calendario_sync
 from source.pdf_pipeline import index_pdf
 
 load_dotenv()
@@ -354,7 +355,14 @@ BGSTATS_EXPORT_PATH = os.path.join(
 def bgstats_sync_endpoint():
     if not os.path.exists(BGSTATS_EXPORT_PATH):
         raise HTTPException(status_code=404, detail=f"No existe {BGSTATS_EXPORT_PATH}")
-    return bgstats_sync(BGSTATS_EXPORT_PATH)
+    resultado = bgstats_sync(BGSTATS_EXPORT_PATH)
+    try:
+        resultado["calendario"] = calendario_sync()
+    except Exception as e:
+        # los calendarios de iCloud son un extra sobre el sync principal de BG Stats;
+        # si fallan (link vencido, red) no debe tumbar la sincronizacion de partidas/juegos
+        resultado["calendario_error"] = str(e)
+    return resultado
 
 
 @app.post("/ask", response_model=AskResponse)

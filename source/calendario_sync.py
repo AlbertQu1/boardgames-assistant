@@ -11,6 +11,7 @@ Uso:
 
 import os
 import re
+from datetime import date
 
 import psycopg2
 import requests
@@ -63,7 +64,12 @@ def sync() -> dict:
             print(f"  aviso: no hay URL configurada para calendario '{tipo}' (revisa .env)")
             continue
         eventos = fetch_ical_events(url)
+        hoy = date.today().strftime("%Y%m%d")  # mismo formato que fecha_inicio (YYYYMMDD, sin guiones)
         for ev in eventos:
+            if ev["fecha_inicio"] > hoy:
+                # planes a futuro: se ignoran hasta que ya hayan empezado, para no
+                # guardar en el historial algo que todavia puede cambiar/cancelarse
+                continue
             # DTEND en ICS es exclusivo (el dia despues del ultimo dia real);
             # se guarda el rango tal cual, la resta se hace al consultar.
             jugador_uuid = jugador_por_nombre.get(ev["nombre"].strip().lower()) if tipo == "visita" else None
