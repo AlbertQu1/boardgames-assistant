@@ -118,20 +118,24 @@ def normalizar_fuente_compra(raw, alias_map: dict, lugares_por_nombre: dict):
     return limpio, lugar_uuid, lugar_uuid is not None
 
 
-def obtener_tasa_fx(moneda: str, fecha: str, cache: dict):
+def obtener_tasa_fx(moneda: str, fecha: str, cache: dict, intentos: int = 3):
     clave = (moneda, fecha)
     if clave in cache:
         return cache[clave]
     tasa = None
-    try:
-        resp = requests.get(
-            f"https://api.frankfurter.dev/v1/{fecha}", params={"from": moneda, "to": "MXN"}, timeout=10
-        )
-        resp.raise_for_status()
-        tasa = resp.json()["rates"]["MXN"]
-    except (requests.RequestException, KeyError, ValueError) as e:
-        print(f"  aviso: no se pudo obtener tasa {moneda}->MXN para {fecha} ({e})")
-        tasa = None
+    ultimo_error = None
+    for intento in range(intentos):
+        try:
+            resp = requests.get(
+                f"https://api.frankfurter.dev/v1/{fecha}", params={"from": moneda, "to": "MXN"}, timeout=20
+            )
+            resp.raise_for_status()
+            tasa = resp.json()["rates"]["MXN"]
+            break
+        except (requests.RequestException, KeyError, ValueError) as e:
+            ultimo_error = e
+    if tasa is None:
+        print(f"  aviso: no se pudo obtener tasa {moneda}->MXN para {fecha} tras {intentos} intentos ({ultimo_error})")
     cache[clave] = tasa
     return tasa
 
