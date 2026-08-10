@@ -204,6 +204,20 @@ def juegos():
     return result
 
 
+@app.get("/juegos/catalogo")
+def juegos_catalogo():
+    """Nombres tal cual BGG de toda tu biblioteca de BG Stats (no solo lo ya
+    indexado) — para autocompletar al agregar un reglamento nuevo y evitar
+    que el mismo juego termine indexado bajo nombres ligeramente distintos."""
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute("SELECT nombre FROM bgstats.juegos ORDER BY nombre;")
+    result = [row[0] for row in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return result
+
+
 @app.get("/juegos/faltantes")
 def juegos_faltantes():
     conn = psycopg2.connect(os.environ["DATABASE_URL"])

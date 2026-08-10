@@ -311,6 +311,12 @@ def sync(path: str) -> dict:
         )
     lugar_id_a_uuid = {l["id"]: l["uuid"] for l in data["locations"]}
 
+    # override manual de lugar por partida (ej. partidas etiquetadas "Vacaciones" en BG Stats
+    # que en realidad fueron en un lugar especifico segun el comentario) — sin esto, cada sync
+    # pisaria la reasignacion con el locationRefId generico del export crudo
+    cur.execute("SELECT partida_uuid, lugar_uuid FROM bgstats.partida_lugar_override")
+    lugar_override = {str(partida_uuid).lower(): lugar_uuid for partida_uuid, lugar_uuid in cur.fetchall()}
+
     # partidas + partida_jugadores
     for play in data["plays"]:
         expansiones = [
@@ -318,6 +324,9 @@ def sync(path: str) -> dict:
             for e in play.get("expansionPlays", [])
             if e.get("gameRefId") in juego_id_a_uuid
         ]
+        lugar_uuid_final = lugar_override.get(
+            play["uuid"].lower(), lugar_id_a_uuid.get(play.get("locationRefId"))
+        )
         cur.execute(
             """
             INSERT INTO bgstats.partidas
@@ -332,7 +341,7 @@ def sync(path: str) -> dict:
             """,
             (
                 play["uuid"], juego_id_a_uuid.get(play["gameRefId"]),
-                lugar_id_a_uuid.get(play.get("locationRefId")), play["playDate"], play.get("durationMin"),
+                lugar_uuid_final, play["playDate"], play.get("durationMin"),
                 play.get("comments"), play.get("usesTeams"), expansiones or None, play.get("modificationDate"),
                 json.dumps(play),
             ),
