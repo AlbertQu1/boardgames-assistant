@@ -30,7 +30,7 @@ def search(pregunta: str, juego: str | None, idioma: str | None, top_k: int = 5)
     cur = conn.cursor()
 
     sql = f"""
-        SELECT juego, source_pdf, chunk_index, chunk_text, idioma,
+        SELECT juego, source_pdf, chunk_index, chunk_text, idioma, doc_type,
                1 - (embedding <=> %s) AS similitud
         FROM {params.DB_SCHEMA}.{params.CHUNKS_TABLE}
     """
@@ -62,6 +62,6 @@ if __name__ == "__main__":
     parser.add_argument("--top-k", type=int, default=5)
     args = parser.parse_args()
 
-    for juego, pdf, idx, texto, idioma, sim in search(args.pregunta, args.juego, args.idioma, args.top_k):
-        print(f"\n[{juego} | {pdf} | chunk {idx} | idioma={idioma} | sim={sim:.3f}]")
+    for juego, pdf, idx, texto, idioma, doc_type, sim in search(args.pregunta, args.juego, args.idioma, args.top_k):
+        print(f"\n[{juego} | {pdf} | chunk {idx} | idioma={idioma} | doc_type={doc_type} | sim={sim:.3f}]")
         print(texto[:400])
