@@ -111,6 +111,11 @@ TOOLS = types.Tool(
                 "posicion, gano, orden_asiento)\n"
                 "- bgstats.clima_diario(lugar_uuid, fecha, temp_media_c, precipitacion_mm) — clima "
                 "historico por lugar+dia, unir con partidas via lugar_uuid y fecha::date = fecha\n"
+                "- bgstats.calendario_eventos(tipo — 'visita' o 'vacacion', nombre, fecha_inicio, fecha_fin, "
+                "jugador_uuid — FK a jugadores si el nombre de la visita coincide con un jugador registrado) "
+                "— fecha_fin es EXCLUSIVA (formato ICS), el ultimo dia real es fecha_fin - 1 dia. Usar para "
+                "preguntas de cuanto se juega cuando alguien visita, o que se jugo en vacaciones: unir con "
+                "partidas via p.fecha::date BETWEEN ce.fecha_inicio AND (ce.fecha_fin - INTERVAL '1 day')\n"
                 "Nota: 'Ticket to Ride' (el base) tiene es_expansion=true por un dato asi de BGG, "
                 "no asumir que es_expansion=false significa 'juego base jugable'."
             ),
