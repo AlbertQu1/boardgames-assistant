@@ -8,6 +8,18 @@ Ademas de las columnas tipadas (nombre, fechas, etc.), cada tabla guarda el
 registro crudo del JSON en `datos_extra` (JSONB) para no perder informacion
 que BG Stats agregue en el futuro y que todavia no tiene columna propia.
 
+`acquired_from` es texto libre (typos, mayusculas distintas, variantes del
+mismo lugar) escrito en BG Stats. En cada corrida se normaliza contra
+bgstats.fuentes_compra_alias (variantes conocidas -> nombre canonico,
+opcionalmente ligado a un bgstats.lugares existente) y, si no hay alias
+pero el texto coincide con un lugar ya trackeado, se liga automaticamente.
+Agregar una fila nueva a fuentes_compra_alias es suficiente para que la
+proxima corrida junte una variante nueva sin tocar este script.
+
+Tambien convierte precios en USD/CAD a MXN usando la tasa historica del dia
+de adquisicion (api.frankfurter.dev, gratis, sin API key) para poder sumar
+y comparar gastos en una sola moneda.
+
 Uso:
     python source/bgstats_sync.py --archivo pdfs_prueba/BGStatsExport.json
 """
@@ -17,6 +29,7 @@ import json
 import os
 
 import psycopg2
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -65,6 +78,74 @@ COPIA_CAMPOS_TIPADOS = {
     "Rating", "Quantity",
 }
 
+# monedas que no son un codigo ISO real (ej. "otro") y no se pueden convertir
+MONEDAS_NO_CONVERTIBLES = {"otro"}
+
+
+def cargar_alias_compra(cur) -> dict:
+    cur.execute("SELECT alias, fuente_canonica, lugar_uuid FROM bgstats.fuentes_compra_alias")
+    return {alias: (canonica, lugar_uuid) for alias, canonica, lugar_uuid in cur.fetchall()}
+
+
+def cargar_moneda_override(cur) -> dict:
+    """Copias donde price_paid_currency del export es ambiguo (ej. "otro") y se
+    confirmo manualmente cual era la moneda real. Ver bgstats.colecciones_moneda_override.
+    Las claves se normalizan a minusculas: BG Stats exporta uuids en mayusculas
+    pero psycopg2 los regresa como uuid.UUID (str() en minusculas)."""
+    cur.execute("SELECT copia_uuid, moneda_real FROM bgstats.colecciones_moneda_override")
+    return {str(copia_uuid).lower(): moneda for copia_uuid, moneda in cur.fetchall()}
+
+
+def normalizar_fuente_compra(raw, alias_map: dict, lugares_por_nombre: dict):
+    """Devuelve (fuente_canonica, lugar_uuid, reconocido). `reconocido` es False
+    solo cuando el texto no coincide con ningun alias ni lugar existente."""
+    if not raw:
+        return None, None, True
+    limpio = raw.strip()
+    if not limpio:
+        return None, None, True
+    if limpio in alias_map:
+        canonica, lugar_uuid = alias_map[limpio]
+        return canonica, lugar_uuid, True
+    lugar_uuid = lugares_por_nombre.get(limpio.lower())
+    return limpio, lugar_uuid, lugar_uuid is not None
+
+
+def obtener_tasa_fx(moneda: str, fecha: str, cache: dict):
+    clave = (moneda, fecha)
+    if clave in cache:
+        return cache[clave]
+    tasa = None
+    try:
+        resp = requests.get(
+            f"https://api.frankfurter.dev/v1/{fecha}", params={"from": moneda, "to": "MXN"}, timeout=10
+        )
+        resp.raise_for_status()
+        tasa = resp.json()["rates"]["MXN"]
+    except (requests.RequestException, KeyError, ValueError) as e:
+        print(f"  aviso: no se pudo obtener tasa {moneda}->MXN para {fecha} ({e})")
+        tasa = None
+    cache[clave] = tasa
+    return tasa
+
+
+def convertir_a_mxn(price_paid, moneda: str, fecha, fecha_alterna, cache: dict):
+    """Devuelve (price_paid_mxn, tasa_usada, fecha_usada)."""
+    if price_paid is None:
+        return None, None, None
+    moneda_limpia = (moneda or "").strip()
+    if moneda_limpia.lower() in MONEDAS_NO_CONVERTIBLES:
+        return None, None, None
+    if not moneda_limpia or moneda_limpia.upper() == "MXN":
+        return price_paid, 1.0, fecha or fecha_alterna
+    fecha_para_tasa = fecha or fecha_alterna
+    if not fecha_para_tasa:
+        return None, None, None
+    tasa = obtener_tasa_fx(moneda_limpia.upper(), fecha_para_tasa, cache)
+    if tasa is None:
+        return None, None, None
+    return round(price_paid * tasa, 2), tasa, fecha_para_tasa
+
 
 def sync(path: str) -> dict:
     with open(path) as f:
@@ -104,6 +185,13 @@ def sync(path: str) -> dict:
     juego_id_a_uuid = {g["id"]: g["uuid"] for g in data["games"]}
 
     # colecciones (una fila por copia fisica de un juego: precio, origen, estado)
+    alias_compra = cargar_alias_compra(cur)
+    moneda_override = cargar_moneda_override(cur)
+    cur.execute("SELECT nombre, uuid FROM bgstats.lugares")
+    lugares_por_nombre = {nombre.strip().lower(): uuid for nombre, uuid in cur.fetchall()}
+    fx_cache: dict = {}
+    fuentes_sin_normalizar = set()
+
     cur.execute(
         "DELETE FROM bgstats.colecciones WHERE juego_uuid = ANY(%s::uuid[])",
         (list(juego_id_a_uuid.values()),),
@@ -113,6 +201,23 @@ def sync(path: str) -> dict:
         for copia in g.get("copies", []):
             md = parse_metadata(copia.get("metaData"))
             extra = {k: v for k, v in md.items() if k not in COPIA_CAMPOS_TIPADOS}
+
+            acquired_from_raw = md.get("AcquiredFrom") or None
+            fuente_compra, lugar_compra_uuid, reconocido = normalizar_fuente_compra(
+                acquired_from_raw, alias_compra, lugares_por_nombre
+            )
+            if acquired_from_raw and not reconocido:
+                fuentes_sin_normalizar.add(acquired_from_raw.strip())
+
+            acquisition_date = parse_date(md.get("AcquisitionDate"))
+            inventory_date = parse_date(md.get("InventoryDate"))
+            price_paid = parse_float(md.get("PricePaid"))
+            price_paid_currency = md.get("PricePaidCurrency") or None
+            moneda_para_conversion = moneda_override.get(copia["uuid"].lower(), price_paid_currency)
+            price_paid_mxn, fx_rate_usada, fx_fecha_usada = convertir_a_mxn(
+                price_paid, moneda_para_conversion, acquisition_date, inventory_date, fx_cache
+            )
+
             cur.execute(
                 """
                 INSERT INTO bgstats.colecciones
@@ -121,9 +226,10 @@ def sync(path: str) -> dict:
                      status_wishlist, status_preordered, acquired_from, acquisition_date,
                      inventory_location, inventory_date, price_paid, price_paid_currency,
                      current_price, current_price_currency, rating, quantity, metadata_extra,
-                     modification_date)
+                     modification_date, fuente_compra, lugar_compra_uuid, price_paid_mxn,
+                     fx_rate_usada, fx_fecha_usada)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s::jsonb, %s)
+                        %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (uuid) DO UPDATE SET
                     juego_uuid = EXCLUDED.juego_uuid, version_name = EXCLUDED.version_name,
                     year = EXCLUDED.year, status_owned = EXCLUDED.status_owned,
@@ -137,7 +243,10 @@ def sync(path: str) -> dict:
                     price_paid = EXCLUDED.price_paid, price_paid_currency = EXCLUDED.price_paid_currency,
                     current_price = EXCLUDED.current_price, current_price_currency = EXCLUDED.current_price_currency,
                     rating = EXCLUDED.rating, quantity = EXCLUDED.quantity,
-                    metadata_extra = EXCLUDED.metadata_extra, modification_date = EXCLUDED.modification_date
+                    metadata_extra = EXCLUDED.metadata_extra, modification_date = EXCLUDED.modification_date,
+                    fuente_compra = EXCLUDED.fuente_compra, lugar_compra_uuid = EXCLUDED.lugar_compra_uuid,
+                    price_paid_mxn = EXCLUDED.price_paid_mxn, fx_rate_usada = EXCLUDED.fx_rate_usada,
+                    fx_fecha_usada = EXCLUDED.fx_fecha_usada
                 """,
                 (
                     copia["uuid"], juego_uuid, copia.get("versionName"), copia.get("year"),
@@ -145,12 +254,13 @@ def sync(path: str) -> dict:
                     parse_bool(copia.get("statusForTrade")), parse_bool(copia.get("statusWantInTrade")),
                     parse_bool(copia.get("statusWantToBuy")), parse_bool(copia.get("statusWantToPlay")),
                     parse_bool(copia.get("statusWishlist")), parse_bool(copia.get("statusPreordered")),
-                    md.get("AcquiredFrom") or None, parse_date(md.get("AcquisitionDate")),
-                    md.get("InventoryLocation") or None, parse_date(md.get("InventoryDate")),
-                    parse_float(md.get("PricePaid")), md.get("PricePaidCurrency") or None,
+                    acquired_from_raw, acquisition_date,
+                    md.get("InventoryLocation") or None, inventory_date,
+                    price_paid, price_paid_currency,
                     parse_float(md.get("CurrentPrice")), md.get("CurrentPriceCurrency") or None,
                     parse_float(md.get("Rating")), parse_int(md.get("Quantity")),
                     json.dumps(extra), copia.get("modificationDate"),
+                    fuente_compra, lugar_compra_uuid, price_paid_mxn, fx_rate_usada, fx_fecha_usada,
                 ),
             )
 
@@ -237,6 +347,7 @@ def sync(path: str) -> dict:
         "jugadores": len(data["players"]),
         "lugares": len(data["locations"]),
         "partidas": len(data["plays"]),
+        "fuentes_compra_sin_normalizar": sorted(fuentes_sin_normalizar),
     }
     cur.close()
     conn.close()
@@ -250,3 +361,10 @@ if __name__ == "__main__":
 
     counts = sync(args.archivo)
     print(f"Sincronizado: {counts}")
+    if counts["fuentes_compra_sin_normalizar"]:
+        print(
+            "Fuentes de compra sin alias ni lugar (se guardaron tal cual, "
+            "agrega una fila a bgstats.fuentes_compra_alias si son variantes de algo existente):"
+        )
+        for f in counts["fuentes_compra_sin_normalizar"]:
+            print(f"  - {f}")

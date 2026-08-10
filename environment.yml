@@ -18,3 +18,4 @@ dependencies:
       - pytesseract
       - pdf2image
       - python-multipart
+      - requests
