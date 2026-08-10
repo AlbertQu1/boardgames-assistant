@@ -86,11 +86,14 @@ TOOLS = types.Tool(
                 "designers, min_jugadores, max_jugadores, min_duracion_min, max_duracion_min, cooperativo, "
                 "rating, veces_jugado_previo)\n"
                 "- bgstats.jugadores(uuid, nombre, es_anonimo)\n"
-                "- bgstats.lugares(uuid, nombre)\n"
+                "- bgstats.lugares(uuid, nombre, lat, lon, direccion_referencia) — lat/lon puede ser NULL, "
+                "no todos los lugares tienen coordenadas todavia\n"
                 "- bgstats.partidas(uuid, juego_uuid, lugar_uuid, fecha, duracion_min, comentarios, "
                 "usa_equipos, expansiones_usadas)\n"
                 "- bgstats.partida_jugadores(partida_uuid, jugador_uuid, nombre_anonimo, puntaje, "
                 "posicion, gano, orden_asiento)\n"
+                "- bgstats.clima_diario(lugar_uuid, fecha, temp_media_c, precipitacion_mm) — clima "
+                "historico por lugar+dia, unir con partidas via lugar_uuid y fecha::date = fecha\n"
                 "Nota: 'Ticket to Ride' (el base) tiene es_expansion=true por un dato asi de BGG, "
                 "no asumir que es_expansion=false significa 'juego base jugable'."
             ),
@@ -173,6 +176,32 @@ def juegos():
         f"SELECT DISTINCT juego, juego_base FROM {params.DB_SCHEMA}.{params.CHUNKS_TABLE} ORDER BY juego;"
     )
     result = [{"juego": row[0], "juego_base": row[1]} for row in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return result
+
+
+@app.get("/juegos/faltantes")
+def juegos_faltantes():
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT j.nombre, j.es_propio, COUNT(p.uuid) AS partidas, MAX(p.fecha) AS ultima_partida
+        FROM bgstats.juegos j
+        LEFT JOIN bgstats.partidas p ON p.juego_uuid = j.uuid
+        WHERE NOT EXISTS (
+            SELECT 1 FROM {params.DB_SCHEMA}.{params.CHUNKS_TABLE} rc
+            WHERE rc.juego = j.nombre OR rc.juego_base = j.nombre
+        )
+        GROUP BY j.nombre, j.es_propio
+        ORDER BY j.es_propio DESC, partidas DESC;
+        """
+    )
+    result = [
+        {"juego": row[0], "es_propio": row[1], "partidas": row[2], "ultima_partida": row[3]}
+        for row in cur.fetchall()
+    ]
     cur.close()
     conn.close()
     return result

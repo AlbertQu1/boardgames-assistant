@@ -31,13 +31,14 @@ def sync(path: str) -> dict:
 
     # juegos
     for g in data["games"]:
+        es_propio = any(copy.get("statusOwned") == 1 for copy in g.get("copies", []))
         cur.execute(
             """
             INSERT INTO bgstats.juegos
                 (uuid, bg_stats_id, nombre, bgg_id, bgg_nombre, bgg_year, es_expansion, es_base,
                  designers, min_jugadores, max_jugadores, min_duracion_min, max_duracion_min,
-                 cooperativo, rating, veces_jugado_previo, modification_date)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 cooperativo, rating, veces_jugado_previo, modification_date, es_propio)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (uuid) DO UPDATE SET
                 nombre = EXCLUDED.nombre, bgg_id = EXCLUDED.bgg_id, bgg_nombre = EXCLUDED.bgg_nombre,
                 bgg_year = EXCLUDED.bgg_year, es_expansion = EXCLUDED.es_expansion, es_base = EXCLUDED.es_base,
@@ -45,13 +46,14 @@ def sync(path: str) -> dict:
                 max_jugadores = EXCLUDED.max_jugadores, min_duracion_min = EXCLUDED.min_duracion_min,
                 max_duracion_min = EXCLUDED.max_duracion_min, cooperativo = EXCLUDED.cooperativo,
                 rating = EXCLUDED.rating, veces_jugado_previo = EXCLUDED.veces_jugado_previo,
-                modification_date = EXCLUDED.modification_date
+                modification_date = EXCLUDED.modification_date, es_propio = EXCLUDED.es_propio
             """,
             (
                 g["uuid"], g["id"], g["name"], g.get("bggId"), g.get("bggName"), g.get("bggYear"),
                 parse_bool(g.get("isExpansion")), parse_bool(g.get("isBaseGame")), g.get("designers"),
                 g.get("minPlayerCount"), g.get("maxPlayerCount"), g.get("minPlayTime"), g.get("maxPlayTime"),
                 g.get("cooperative"), g.get("rating"), g.get("previouslyPlayedAmount"), g.get("modificationDate"),
+                es_propio,
             ),
         )
     juego_id_a_uuid = {g["id"]: g["uuid"] for g in data["games"]}

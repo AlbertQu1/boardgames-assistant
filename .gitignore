@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 pdfs_prueba/*.pdf
 pdfs_prueba/*.docx
+pdfs_prueba/pendientes/
 bgstats_data/
