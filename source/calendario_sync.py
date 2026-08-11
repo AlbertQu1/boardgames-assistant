@@ -1,8 +1,9 @@
 """
-Trae eventos de los calendarios personales de iCloud (Vacaciones/Visitas,
-publicados como ICS) para poder correlacionar partidas con vacaciones fuera
-de casa o con visitas de personas especificas. Liga automaticamente un
-evento de "visita" a un jugador existente en bgstats.jugadores si el nombre
+Trae eventos de visitas (calendario personal de iCloud, publicado como ICS)
+y de vacaciones (tabla vacation_trips de la app Vacaciones, DB separada)
+para poder correlacionar partidas con vacaciones fuera de casa o con
+visitas de personas especificas. Liga automaticamente un evento de
+"visita" a un jugador existente en bgstats.jugadores si el nombre
 coincide (ej. "Paul"). Idempotente (upsert por tipo+nombre+rango de fechas).
 
 Uso:
@@ -11,7 +12,7 @@ Uso:
 
 import os
 import re
-from datetime import date
+from datetime import date, timedelta
 
 import psycopg2
 import requests
@@ -23,7 +24,7 @@ load_dotenv()
 def fetch_ical_events(url: str) -> list[dict]:
     """Descarga un calendario ICS publicado y regresa sus VEVENT como dicts
     {nombre, fecha_inicio, fecha_fin}. No expande RRULE: este calendario
-    personal solo tiene eventos unicos, uno por visita/vacacion."""
+    personal solo tiene eventos unicos, uno por visita."""
     if not url:
         return []
     resp = requests.get(url, timeout=15)
@@ -47,6 +48,29 @@ def fetch_ical_events(url: str) -> list[dict]:
     return eventos
 
 
+def fetch_vacation_trips(hoy: date) -> list[dict]:
+    """Lee vacation_trips de la DB de la app Vacaciones (DB separada, mismo
+    cluster local) y la regresa en el mismo formato {nombre, fecha_inicio,
+    fecha_fin} que fetch_ical_events, con fecha_fin ya convertida a
+    EXCLUSIVA (+1 dia) para respetar el contrato existente de la tabla
+    calendario_eventos, documentado en source/api.py."""
+    conn = psycopg2.connect(os.environ.get("VACATION_DB_URL", "postgresql://albertqu@/vacaciones"))
+    cur = conn.cursor()
+    cur.execute("SELECT destination, departure_date, return_date FROM vacation_trips WHERE departure_date <= %s", (hoy,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    return [
+        {
+            "nombre": destino,
+            "fecha_inicio": salida.strftime("%Y%m%d"),
+            "fecha_fin": (regreso + timedelta(days=1)).strftime("%Y%m%d"),
+        }
+        for destino, salida, regreso in rows
+    ]
+
+
 def sync() -> dict:
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
@@ -54,23 +78,21 @@ def sync() -> dict:
     cur.execute("SELECT nombre, uuid FROM bgstats.jugadores WHERE NOT es_anonimo")
     jugador_por_nombre = {nombre.strip().lower(): uuid for nombre, uuid in cur.fetchall()}
 
+    hoy_date = date.today()
+    hoy = hoy_date.strftime("%Y%m%d")  # mismo formato que fecha_inicio (YYYYMMDD, sin guiones)
+
     counts = {"visita": 0, "vacacion": 0}
     fuentes = [
-        ("visita", os.environ.get("VISITS_CALENDAR_URL", "")),
-        ("vacacion", os.environ.get("VACATION_CALENDAR_URL", "")),
+        ("visita", fetch_ical_events(os.environ.get("VISITS_CALENDAR_URL", ""))),
+        ("vacacion", fetch_vacation_trips(hoy_date)),
     ]
-    for tipo, url in fuentes:
-        if not url:
-            print(f"  aviso: no hay URL configurada para calendario '{tipo}' (revisa .env)")
-            continue
-        eventos = fetch_ical_events(url)
-        hoy = date.today().strftime("%Y%m%d")  # mismo formato que fecha_inicio (YYYYMMDD, sin guiones)
+    for tipo, eventos in fuentes:
         for ev in eventos:
             if ev["fecha_inicio"] > hoy:
                 # planes a futuro: se ignoran hasta que ya hayan empezado, para no
                 # guardar en el historial algo que todavia puede cambiar/cancelarse
                 continue
-            # DTEND en ICS es exclusivo (el dia despues del ultimo dia real);
+            # fecha_fin es exclusiva (el dia despues del ultimo dia real);
             # se guarda el rango tal cual, la resta se hace al consultar.
             jugador_uuid = jugador_por_nombre.get(ev["nombre"].strip().lower()) if tipo == "visita" else None
             cur.execute(
