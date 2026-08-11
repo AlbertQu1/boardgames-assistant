@@ -401,6 +401,149 @@ def bgstats_companeros():
     return result
 
 
+@app.get("/bgstats/resumen")
+def bgstats_resumen():
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COUNT(*), COUNT(DISTINCT juego_uuid),
+               ROUND(SUM(duracion_min) / 60.0, 1), MIN(fecha), MAX(fecha)
+        FROM bgstats.partidas
+        """
+    )
+    partidas, juegos_distintos, horas_totales, primera, ultima = cur.fetchone()
+    cur.execute("SELECT COUNT(*) FROM bgstats.juegos WHERE es_propio")
+    juegos_propios = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+
+    meses_transcurridos = None
+    promedio_mensual = None
+    if primera and ultima:
+        meses_transcurridos = max(1, (ultima.year - primera.year) * 12 + (ultima.month - primera.month) + 1)
+        promedio_mensual = round(partidas / meses_transcurridos, 1)
+
+    return {
+        "partidas": partidas,
+        "juegos_distintos": juegos_distintos,
+        "juegos_propios": juegos_propios,
+        "horas_totales": horas_totales,
+        "primera_partida": primera,
+        "ultima_partida": ultima,
+        "promedio_partidas_mes": promedio_mensual,
+    }
+
+
+@app.get("/bgstats/top-juegos")
+def bgstats_top_juegos(limite: int = 15):
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT j.nombre, COUNT(*) AS partidas, ROUND(SUM(p.duracion_min) / 60.0, 1) AS horas
+        FROM bgstats.partidas p JOIN bgstats.juegos j ON j.uuid = p.juego_uuid
+        GROUP BY j.nombre
+        ORDER BY partidas DESC
+        LIMIT %s
+        """,
+        (limite,),
+    )
+    result = [{"juego": r[0], "partidas": r[1], "horas": float(r[2] or 0)} for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return result
+
+
+DIAS_SEMANA = ["Domingo", "Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"]
+
+
+@app.get("/bgstats/cuando-juegas")
+def bgstats_cuando_juegas():
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT EXTRACT(DOW FROM fecha)::int AS dow, COUNT(*)
+        FROM bgstats.partidas GROUP BY dow ORDER BY dow
+        """
+    )
+    por_dia_semana = [{"dia": DIAS_SEMANA[dow], "partidas": n} for dow, n in cur.fetchall()]
+
+    cur.execute(
+        """
+        SELECT to_char(fecha, 'YYYY-MM') AS mes, COUNT(*)
+        FROM bgstats.partidas
+        WHERE fecha >= (CURRENT_DATE - INTERVAL '12 months')
+        GROUP BY mes ORDER BY mes
+        """
+    )
+    por_mes = [{"mes": mes, "partidas": n} for mes, n in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return {"por_dia_semana": por_dia_semana, "por_mes": por_mes}
+
+
+@app.get("/bgstats/clima")
+def bgstats_clima():
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            CASE WHEN c.precipitacion_mm > 0 THEN 'lluvia' ELSE 'sin_lluvia' END AS condicion,
+            CASE
+                WHEN c.temp_media_c < 15 THEN 'frio'
+                WHEN c.temp_media_c < 22 THEN 'templado'
+                ELSE 'calido'
+            END AS rango_temp,
+            COUNT(*)
+        FROM bgstats.partidas p
+        JOIN bgstats.lugares l ON l.uuid = p.lugar_uuid
+        JOIN bgstats.clima_diario c ON c.lugar_uuid = l.uuid AND c.fecha = p.fecha::date
+        GROUP BY condicion, rango_temp
+        """
+    )
+    filas = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    lluvia = sum(n for cond, _, n in filas if cond == "lluvia")
+    sin_lluvia = sum(n for cond, _, n in filas if cond == "sin_lluvia")
+    por_temp: dict[str, int] = {}
+    for _, rango, n in filas:
+        por_temp[rango] = por_temp.get(rango, 0) + n
+
+    return {
+        "partidas_con_clima": lluvia + sin_lluvia,
+        "lluvia": lluvia,
+        "sin_lluvia": sin_lluvia,
+        "por_temperatura": [{"rango": r, "partidas": n} for r, n in por_temp.items()],
+    }
+
+
+@app.get("/bgstats/top-lugares")
+def bgstats_top_lugares(limite: int = 15):
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT l.nombre, COUNT(*) AS partidas, l.lat, l.lon
+        FROM bgstats.partidas p JOIN bgstats.lugares l ON l.uuid = p.lugar_uuid
+        GROUP BY l.nombre, l.lat, l.lon
+        ORDER BY partidas DESC
+        LIMIT %s
+        """,
+        (limite,),
+    )
+    result = [
+        {"lugar": r[0], "partidas": r[1], "lat": r[2], "lon": r[3]} for r in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return result
+
+
 @app.post("/bgstats/sync")
 def bgstats_sync_endpoint():
     if not os.path.exists(BGSTATS_EXPORT_PATH):
