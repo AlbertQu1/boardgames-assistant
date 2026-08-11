@@ -368,10 +368,48 @@ BGSTATS_EXPORT_PATH = os.path.join(
 MI_NOMBRE = "Alberto Qu"
 
 
+JUGADOR_ANONIMO_GENERICO = "Jugador anónimo"
+
+
 @app.get("/bgstats/companeros")
-def bgstats_companeros():
+def bgstats_companeros(modo: str = "jugadores"):
+    """modo=jugadores (default): companeros reales, con nombre propio (Frank,
+    Jairo...) o desconocidos identificados por partida (xJairo, etc), excluye
+    el cajon generico "Jugador anonimo" (gente al azar de la que no se guardo
+    nombre, poco probable volver a ver).
+    modo=solo: partidas sin companero real -- el generico de arriba, o
+    partidas con el tag "Solo"/Automa -- agrupadas por juego, no por persona.
+    modo=todos: companeros reales + el cajon generico, comportamiento previo.
+    """
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
+
+    if modo == "solo":
+        cur.execute(
+            """
+            WITH con_companero_real AS (
+                SELECT DISTINCT pj.partida_uuid
+                FROM bgstats.partida_jugadores pj
+                LEFT JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
+                WHERE COALESCE(pj.nombre_anonimo, j.nombre) NOT IN (%s, %s)
+                  AND COALESCE(pj.nombre_anonimo, j.nombre) IS NOT NULL
+            )
+            SELECT g.nombre, COUNT(DISTINCT p.uuid)
+            FROM bgstats.partidas p
+            JOIN bgstats.juegos g ON g.uuid = p.juego_uuid
+            WHERE p.uuid NOT IN (SELECT partida_uuid FROM con_companero_real)
+               OR p.datos_extra::text LIKE '%%"Solo"%%'
+            GROUP BY g.nombre
+            ORDER BY 2 DESC
+            """,
+            (MI_NOMBRE, JUGADOR_ANONIMO_GENERICO),
+        )
+        result = [{"nombre": nombre, "partidas": n, "victorias": 0} for nombre, n in cur.fetchall()]
+        cur.close()
+        conn.close()
+        result.sort(key=lambda r: r["partidas"], reverse=True)
+        return result
+
     cur.execute(
         """
         SELECT COALESCE(pj.nombre_anonimo, j.nombre) AS nombre, pj.partida_uuid,
@@ -380,8 +418,9 @@ def bgstats_companeros():
         LEFT JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
         WHERE COALESCE(pj.nombre_anonimo, j.nombre) IS NOT NULL
           AND COALESCE(pj.nombre_anonimo, j.nombre) != %s
+          AND (%s OR pj.nombre_anonimo IS NOT NULL OR j.nombre != %s)
         """,
-        (MI_NOMBRE,),
+        (MI_NOMBRE, modo == "todos", JUGADOR_ANONIMO_GENERICO),
     )
     conteo: dict[str, dict] = {}
     for nombre_crudo, partida_uuid, gano in cur.fetchall():
