@@ -370,29 +370,34 @@ MI_NOMBRE = "Alberto Qu"
 
 JUGADOR_ANONIMO_GENERICO = "Jugador anónimo"
 
+# nombres de oponentes automa/bot (BG Stats los registra como "jugador" con
+# nombre propio, ej. "Vanderbot Jr 🤖") -- no son companeros reales
+FILTRO_NO_BOT = "COALESCE(pj.nombre_anonimo, j.nombre) NOT LIKE '%%🤖%%'"
+
 
 @app.get("/bgstats/companeros")
 def bgstats_companeros(modo: str = "jugadores"):
     """modo=jugadores (default): companeros reales, con nombre propio (Frank,
     Jairo...) o desconocidos identificados por partida (xJairo, etc), excluye
     el cajon generico "Jugador anonimo" (gente al azar de la que no se guardo
-    nombre, poco probable volver a ver).
-    modo=solo: partidas sin companero real -- el generico de arriba, o
-    partidas con el tag "Solo"/Automa -- agrupadas por juego, no por persona.
-    modo=todos: companeros reales + el cajon generico, comportamiento previo.
+    nombre, poco probable volver a ver) y a los oponentes automa/bot.
+    modo=solo: partidas sin companero real -- el generico de arriba, contra
+    un bot, o con el tag "Solo"/Automa -- agrupadas por juego, no por persona.
+    modo=todos: companeros reales + el cajon generico + bots, comportamiento previo.
     """
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
 
     if modo == "solo":
         cur.execute(
-            """
+            f"""
             WITH con_companero_real AS (
                 SELECT DISTINCT pj.partida_uuid
                 FROM bgstats.partida_jugadores pj
                 LEFT JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
                 WHERE COALESCE(pj.nombre_anonimo, j.nombre) NOT IN (%s, %s)
                   AND COALESCE(pj.nombre_anonimo, j.nombre) IS NOT NULL
+                  AND {FILTRO_NO_BOT}
             )
             SELECT g.nombre, COUNT(DISTINCT p.uuid)
             FROM bgstats.partidas p
@@ -411,14 +416,14 @@ def bgstats_companeros(modo: str = "jugadores"):
         return result
 
     cur.execute(
-        """
+        f"""
         SELECT COALESCE(pj.nombre_anonimo, j.nombre) AS nombre, pj.partida_uuid,
                pj.gano
         FROM bgstats.partida_jugadores pj
         LEFT JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
         WHERE COALESCE(pj.nombre_anonimo, j.nombre) IS NOT NULL
           AND COALESCE(pj.nombre_anonimo, j.nombre) != %s
-          AND (%s OR pj.nombre_anonimo IS NOT NULL OR j.nombre != %s)
+          AND (%s OR (pj.nombre_anonimo IS NOT NULL OR j.nombre != %s) AND {FILTRO_NO_BOT})
         """,
         (MI_NOMBRE, modo == "todos", JUGADOR_ANONIMO_GENERICO),
     )
