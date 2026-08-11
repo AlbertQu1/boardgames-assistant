@@ -365,6 +365,51 @@ BGSTATS_EXPORT_PATH = os.path.join(
 )
 
 
+MI_NOMBRE = "Alberto Qu"
+
+
+def limpiar_nombre_anonimo(nombre: str) -> str:
+    """BG Stats no soporta grupos para jugadores anonimos, asi que Alberto usaba
+    una letra minuscula como prefijo informal (ej. "xJairo") para poder
+    diferenciarlos en la app sin exponer la categoria en el nombre visible."""
+    if len(nombre) >= 2 and nombre[0].islower() and nombre[1].isupper():
+        return nombre[1:]
+    return nombre
+
+
+@app.get("/bgstats/companeros")
+def bgstats_companeros():
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COALESCE(pj.nombre_anonimo, j.nombre) AS nombre, pj.partida_uuid,
+               pj.gano
+        FROM bgstats.partida_jugadores pj
+        LEFT JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
+        WHERE COALESCE(pj.nombre_anonimo, j.nombre) IS NOT NULL
+          AND COALESCE(pj.nombre_anonimo, j.nombre) != %s
+        """,
+        (MI_NOMBRE,),
+    )
+    conteo: dict[str, dict] = {}
+    for nombre_crudo, partida_uuid, gano in cur.fetchall():
+        nombre = limpiar_nombre_anonimo(nombre_crudo)
+        stats = conteo.setdefault(nombre, {"partidas": set(), "victorias": 0})
+        stats["partidas"].add(partida_uuid)
+        if gano:
+            stats["victorias"] += 1
+    cur.close()
+    conn.close()
+
+    result = [
+        {"nombre": nombre, "partidas": len(v["partidas"]), "victorias": v["victorias"]}
+        for nombre, v in conteo.items()
+    ]
+    result.sort(key=lambda r: r["partidas"], reverse=True)
+    return result
+
+
 @app.post("/bgstats/sync")
 def bgstats_sync_endpoint():
     if not os.path.exists(BGSTATS_EXPORT_PATH):
