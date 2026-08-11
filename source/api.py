@@ -627,6 +627,74 @@ def bgstats_top_lugares(limite: int = 15):
     return result
 
 
+@app.get("/bgstats/coleccion")
+def bgstats_coleccion():
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT ROUND(SUM(price_paid_mxn)::numeric, 2),
+               COUNT(*) FILTER (WHERE status_owned),
+               COUNT(*) FILTER (WHERE status_prev_owned AND NOT status_owned),
+               COUNT(*) FILTER (WHERE status_wishlist)
+        FROM bgstats.colecciones
+        """
+    )
+    gasto_total, copias_propias, copias_ya_no_tiene, en_wishlist = cur.fetchone()
+
+    cur.execute(
+        """
+        SELECT COUNT(*) FILTER (WHERE es_propio),
+               COUNT(*) FILTER (WHERE es_propio AND NOT EXISTS (
+                   SELECT 1 FROM bgstats.partidas p WHERE p.juego_uuid = j.uuid
+               ))
+        FROM bgstats.juegos j
+        """
+    )
+    juegos_propios_total, juegos_propios_sin_jugar = cur.fetchone()
+
+    cur.execute(
+        """
+        SELECT categoria_compra, ROUND(SUM(price_paid_mxn)::numeric, 2), COUNT(*)
+        FROM bgstats.colecciones
+        WHERE categoria_compra IS NOT NULL
+        GROUP BY categoria_compra
+        ORDER BY 2 DESC NULLS LAST
+        """
+    )
+    por_categoria = [
+        {"categoria": r[0], "gasto_mxn": float(r[1] or 0), "juegos": r[2]} for r in cur.fetchall()
+    ]
+
+    cur.execute(
+        """
+        SELECT fuente_compra, ROUND(SUM(price_paid_mxn)::numeric, 2), COUNT(*)
+        FROM bgstats.colecciones
+        WHERE fuente_compra IS NOT NULL
+        GROUP BY fuente_compra
+        ORDER BY 2 DESC NULLS LAST
+        LIMIT 8
+        """
+    )
+    top_fuentes = [
+        {"fuente": r[0], "gasto_mxn": float(r[1] or 0), "juegos": r[2]} for r in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+
+    return {
+        "gasto_total_mxn": float(gasto_total or 0),
+        "copias_propias": copias_propias,
+        "copias_ya_no_tiene": copias_ya_no_tiene,
+        "en_wishlist": en_wishlist,
+        "juegos_propios_total": juegos_propios_total,
+        "juegos_propios_sin_jugar": juegos_propios_sin_jugar,
+        "por_categoria": por_categoria,
+        "top_fuentes": top_fuentes,
+    }
+
+
 @app.post("/bgstats/sync")
 def bgstats_sync_endpoint():
     if not os.path.exists(BGSTATS_EXPORT_PATH):
