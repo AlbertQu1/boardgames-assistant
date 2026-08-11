@@ -380,40 +380,12 @@ def bgstats_companeros(modo: str = "jugadores"):
     """modo=jugadores (default): companeros reales, con nombre propio (Frank,
     Jairo...) o desconocidos identificados por partida (xJairo, etc), excluye
     el cajon generico "Jugador anonimo" (gente al azar de la que no se guardo
-    nombre, poco probable volver a ver) y a los oponentes automa/bot.
-    modo=solo: partidas sin companero real -- el generico de arriba, contra
-    un bot, o con el tag "Solo"/Automa -- agrupadas por juego, no por persona.
-    modo=todos: companeros reales + el cajon generico + bots, comportamiento previo.
+    nombre, poco probable volver a ver) y a los oponentes automa/bot (esos
+    salen en /bgstats/top-juegos?modo=solo, agrupados por juego).
+    modo=todos: companeros reales + el cajon generico + bots.
     """
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
-
-    if modo == "solo":
-        cur.execute(
-            f"""
-            WITH con_companero_real AS (
-                SELECT DISTINCT pj.partida_uuid
-                FROM bgstats.partida_jugadores pj
-                LEFT JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
-                WHERE COALESCE(pj.nombre_anonimo, j.nombre) NOT IN (%s, %s)
-                  AND COALESCE(pj.nombre_anonimo, j.nombre) IS NOT NULL
-                  AND {FILTRO_NO_BOT}
-            )
-            SELECT g.nombre, COUNT(DISTINCT p.uuid)
-            FROM bgstats.partidas p
-            JOIN bgstats.juegos g ON g.uuid = p.juego_uuid
-            WHERE p.uuid NOT IN (SELECT partida_uuid FROM con_companero_real)
-               OR p.datos_extra::text LIKE '%%"Solo"%%'
-            GROUP BY g.nombre
-            ORDER BY 2 DESC
-            """,
-            (MI_NOMBRE, JUGADOR_ANONIMO_GENERICO),
-        )
-        result = [{"nombre": nombre, "partidas": n, "victorias": 0} for nombre, n in cur.fetchall()]
-        cur.close()
-        conn.close()
-        result.sort(key=lambda r: r["partidas"], reverse=True)
-        return result
 
     cur.execute(
         f"""
@@ -480,12 +452,76 @@ def bgstats_resumen():
 
 
 @app.get("/bgstats/top-juegos")
-def bgstats_top_juegos(limite: int = 15):
+def bgstats_top_juegos(limite: int = 15, modo: str = "todos"):
+    """modo=todos (default): todas las partidas, agrupadas por juego.
+    modo=solo: solo partidas sin companero humano real -- 1 sola persona,
+    tag "Solo" oficial de BG Stats, o con un oponente automa/bot -- agrupadas
+    por juego, mostrando que bot(s) se enfrentaron si aplica.
+    """
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
+
+    if modo == "solo":
+        cur.execute(
+            f"""
+            WITH conteo_jugadores AS (
+                SELECT partida_uuid, COUNT(*) AS n FROM bgstats.partida_jugadores GROUP BY partida_uuid
+            ),
+            partida_tiene_bot AS (
+                SELECT DISTINCT pj.partida_uuid
+                FROM bgstats.partida_jugadores pj
+                LEFT JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
+                WHERE {FILTRO_NO_BOT.replace('NOT LIKE', 'LIKE')}
+            ),
+            partidas_solo AS (
+                SELECT p.uuid, p.juego_uuid, p.duracion_min, p.tag_digital
+                FROM bgstats.partidas p
+                LEFT JOIN conteo_jugadores cj ON cj.partida_uuid = p.uuid
+                WHERE p.tag_solo
+                   OR p.uuid IN (SELECT partida_uuid FROM partida_tiene_bot)
+                   OR COALESCE(cj.n, 0) <= 1
+            )
+            SELECT g.nombre, COUNT(*) AS partidas, ROUND(SUM(ps.duracion_min) / 60.0, 1) AS horas,
+                   BOOL_OR(ps.tag_digital) AS digital
+            FROM partidas_solo ps
+            JOIN bgstats.juegos g ON g.uuid = ps.juego_uuid
+            GROUP BY g.nombre
+            ORDER BY partidas DESC
+            LIMIT %s
+            """,
+            (limite,),
+        )
+        filas = cur.fetchall()
+
+        # nombres de bot por juego, deduplicados correctamente (no por partida)
+        cur.execute(
+            f"""
+            SELECT g.nombre, ARRAY_AGG(DISTINCT COALESCE(pj.nombre_anonimo, j.nombre) ORDER BY COALESCE(pj.nombre_anonimo, j.nombre))
+            FROM bgstats.partidas p
+            JOIN bgstats.juegos g ON g.uuid = p.juego_uuid
+            JOIN bgstats.partida_jugadores pj ON pj.partida_uuid = p.uuid
+            LEFT JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
+            WHERE {FILTRO_NO_BOT.replace('NOT LIKE', 'LIKE')}
+            GROUP BY g.nombre
+            """
+        )
+        bots_por_juego = {nombre: bots for nombre, bots in cur.fetchall()}
+        cur.close()
+        conn.close()
+
+        result = [
+            {
+                "juego": r[0], "partidas": r[1], "horas": float(r[2] or 0), "digital": r[3],
+                "bots": ", ".join(bots_por_juego[r[0]]) if r[0] in bots_por_juego else None,
+            }
+            for r in filas
+        ]
+        return result
+
     cur.execute(
         """
-        SELECT j.nombre, COUNT(*) AS partidas, ROUND(SUM(p.duracion_min) / 60.0, 1) AS horas
+        SELECT j.nombre, COUNT(*) AS partidas, ROUND(SUM(p.duracion_min) / 60.0, 1) AS horas,
+               BOOL_OR(p.tag_digital) AS digital
         FROM bgstats.partidas p JOIN bgstats.juegos j ON j.uuid = p.juego_uuid
         GROUP BY j.nombre
         ORDER BY partidas DESC
@@ -493,7 +529,10 @@ def bgstats_top_juegos(limite: int = 15):
         """,
         (limite,),
     )
-    result = [{"juego": r[0], "partidas": r[1], "horas": float(r[2] or 0)} for r in cur.fetchall()]
+    result = [
+        {"juego": r[0], "partidas": r[1], "horas": float(r[2] or 0), "digital": r[3], "bots": None}
+        for r in cur.fetchall()
+    ]
     cur.close()
     conn.close()
     return result

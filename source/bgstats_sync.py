@@ -92,6 +92,26 @@ COPIA_CAMPOS_TIPADOS = {
 MONEDAS_NO_CONVERTIBLES = {"otro"}
 
 
+def resolver_tag_ids(data: dict) -> dict:
+    """Busca por nombre (no por id, que puede variar entre exports) los tags
+    de tipo 'Play' que marcan una partida como Solo o jugada en copia digital."""
+    ids = {"solo": None, "digital": None}
+    for t in data.get("tags", []):
+        if t.get("type") != "Play":
+            continue
+        if t.get("name") == "Solo":
+            ids["solo"] = t["id"]
+        elif t.get("name") == "default_play_tag_digital":
+            ids["digital"] = t["id"]
+    return ids
+
+
+def tiene_tag(play: dict, tag_id) -> bool:
+    if tag_id is None:
+        return False
+    return any(t.get("tagRefId") == tag_id for t in play.get("tags", []))
+
+
 def cargar_alias_compra(cur) -> dict:
     cur.execute("SELECT alias, fuente_canonica, lugar_uuid FROM bgstats.fuentes_compra_alias")
     return {alias: (canonica, lugar_uuid) for alias, canonica, lugar_uuid in cur.fetchall()}
@@ -327,6 +347,7 @@ def sync(path: str) -> dict:
     # pisaria la reasignacion con el locationRefId generico del export crudo
     cur.execute("SELECT partida_uuid, lugar_uuid FROM bgstats.partida_lugar_override")
     lugar_override = {str(partida_uuid).lower(): lugar_uuid for partida_uuid, lugar_uuid in cur.fetchall()}
+    tag_ids = resolver_tag_ids(data)
 
     # partidas + partida_jugadores
     for play in data["plays"]:
@@ -342,19 +363,20 @@ def sync(path: str) -> dict:
             """
             INSERT INTO bgstats.partidas
                 (uuid, juego_uuid, lugar_uuid, fecha, duracion_min, comentarios, usa_equipos,
-                 expansiones_usadas, modification_date, datos_extra)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::uuid[], %s, %s::jsonb)
+                 expansiones_usadas, modification_date, datos_extra, tag_solo, tag_digital)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::uuid[], %s, %s::jsonb, %s, %s)
             ON CONFLICT (uuid) DO UPDATE SET
                 juego_uuid = EXCLUDED.juego_uuid, lugar_uuid = EXCLUDED.lugar_uuid, fecha = EXCLUDED.fecha,
                 duracion_min = EXCLUDED.duracion_min, comentarios = EXCLUDED.comentarios,
                 usa_equipos = EXCLUDED.usa_equipos, expansiones_usadas = EXCLUDED.expansiones_usadas,
-                modification_date = EXCLUDED.modification_date, datos_extra = EXCLUDED.datos_extra
+                modification_date = EXCLUDED.modification_date, datos_extra = EXCLUDED.datos_extra,
+                tag_solo = EXCLUDED.tag_solo, tag_digital = EXCLUDED.tag_digital
             """,
             (
                 play["uuid"], juego_id_a_uuid.get(play["gameRefId"]),
                 lugar_uuid_final, play["playDate"], play.get("durationMin"),
                 play.get("comments"), play.get("usesTeams"), expansiones or None, play.get("modificationDate"),
-                json.dumps(play),
+                json.dumps(play), tiene_tag(play, tag_ids["solo"]), tiene_tag(play, tag_ids["digital"]),
             ),
         )
 
