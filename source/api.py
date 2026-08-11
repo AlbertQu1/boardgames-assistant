@@ -47,7 +47,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import params
 from source.query_test import search
-from source.bgstats_sync import sync as bgstats_sync
+from source.bgstats_sync import limpiar_nombre_prefijo, sync as bgstats_sync
 from source.calendario_sync import sync as calendario_sync
 from source.pdf_pipeline import index_pdf
 
@@ -368,15 +368,6 @@ BGSTATS_EXPORT_PATH = os.path.join(
 MI_NOMBRE = "Alberto Qu"
 
 
-def limpiar_nombre_anonimo(nombre: str) -> str:
-    """BG Stats no soporta grupos para jugadores anonimos, asi que Alberto usaba
-    una letra minuscula como prefijo informal (ej. "xJairo") para poder
-    diferenciarlos en la app sin exponer la categoria en el nombre visible."""
-    if len(nombre) >= 2 and nombre[0].islower() and nombre[1].isupper():
-        return nombre[1:]
-    return nombre
-
-
 @app.get("/bgstats/companeros")
 def bgstats_companeros():
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
@@ -394,7 +385,7 @@ def bgstats_companeros():
     )
     conteo: dict[str, dict] = {}
     for nombre_crudo, partida_uuid, gano in cur.fetchall():
-        nombre = limpiar_nombre_anonimo(nombre_crudo)
+        nombre = limpiar_nombre_prefijo(nombre_crudo)
         stats = conteo.setdefault(nombre, {"partidas": set(), "victorias": 0})
         stats["partidas"].add(partida_uuid)
         if gano:

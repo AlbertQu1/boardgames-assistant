@@ -39,6 +39,16 @@ def parse_bool(v) -> bool:
     return bool(v)
 
 
+def limpiar_nombre_prefijo(nombre: str) -> str:
+    """BG Stats no soporta grupos para jugadores, asi que Alberto usaba una
+    letra minuscula al inicio del nombre (ej. "xJairo", "wDave IT") como
+    categoria informal sin exponerla en el nombre visible. Se guarda el
+    nombre limpio; el original crudo sigue disponible en datos_extra."""
+    if nombre and len(nombre) >= 2 and nombre[0].islower() and nombre[1].isupper():
+        return nombre[1:]
+    return nombre
+
+
 def parse_float(v):
     if v in (None, ""):
         return None
@@ -291,7 +301,8 @@ def sync(path: str) -> dict:
                 datos_extra = EXCLUDED.datos_extra
             """,
             (
-                p["uuid"], p["id"], p["name"], parse_bool(p.get("isAnonymous")), p.get("bggUsername") or None,
+                p["uuid"], p["id"], limpiar_nombre_prefijo(p["name"]), parse_bool(p.get("isAnonymous")),
+                p.get("bggUsername") or None,
                 p.get("modificationDate"), json.dumps(p),
             ),
         )
@@ -356,7 +367,8 @@ def sync(path: str) -> dict:
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
-                    play["uuid"], jugador_id_a_uuid.get(ps.get("playerRefId")), ps.get("anonymousName"),
+                    play["uuid"], jugador_id_a_uuid.get(ps.get("playerRefId")),
+                    limpiar_nombre_prefijo(ps["anonymousName"]) if ps.get("anonymousName") else None,
                     ps.get("score"), ps.get("rank"), ps.get("winner"), ps.get("seatOrder"),
                 ),
             )
