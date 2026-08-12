@@ -308,8 +308,19 @@ def sync(path: str) -> dict:
                 ),
             )
 
+    # override manual de nombre por jugador/lugar (ej. nombres corregidos a mano en Postgres
+    # que BG Stats no tiene bien capturados) — sin esto, cada sync pisaria la correccion con
+    # el nombre crudo del export
+    cur.execute("SELECT jugador_uuid, nombre_real FROM bgstats.jugadores_nombre_override")
+    nombre_override_jugadores = {str(uuid).lower(): nombre for uuid, nombre in cur.fetchall()}
+    cur.execute("SELECT lugar_uuid, nombre_real FROM bgstats.lugares_nombre_override")
+    nombre_override_lugares = {str(uuid).lower(): nombre for uuid, nombre in cur.fetchall()}
+
     # jugadores
     for p in data["players"]:
+        nombre_final = nombre_override_jugadores.get(
+            p["uuid"].lower(), limpiar_nombre_prefijo(p["name"])
+        )
         cur.execute(
             """
             INSERT INTO bgstats.jugadores (uuid, bg_stats_id, nombre, es_anonimo, bgg_username,
@@ -321,7 +332,7 @@ def sync(path: str) -> dict:
                 datos_extra = EXCLUDED.datos_extra
             """,
             (
-                p["uuid"], p["id"], limpiar_nombre_prefijo(p["name"]), parse_bool(p.get("isAnonymous")),
+                p["uuid"], p["id"], nombre_final, parse_bool(p.get("isAnonymous")),
                 p.get("bggUsername") or None,
                 p.get("modificationDate"), json.dumps(p),
             ),
@@ -330,6 +341,7 @@ def sync(path: str) -> dict:
 
     # lugares
     for l in data["locations"]:
+        nombre_final = nombre_override_lugares.get(l["uuid"].lower(), l["name"])
         cur.execute(
             """
             INSERT INTO bgstats.lugares (uuid, bg_stats_id, nombre, modification_date, datos_extra)
@@ -338,7 +350,7 @@ def sync(path: str) -> dict:
                 nombre = EXCLUDED.nombre, modification_date = EXCLUDED.modification_date,
                 datos_extra = EXCLUDED.datos_extra
             """,
-            (l["uuid"], l["id"], l["name"], l.get("modificationDate"), json.dumps(l)),
+            (l["uuid"], l["id"], nombre_final, l.get("modificationDate"), json.dumps(l)),
         )
     lugar_id_a_uuid = {l["id"]: l["uuid"] for l in data["locations"]}
 
