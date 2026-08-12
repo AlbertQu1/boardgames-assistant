@@ -316,41 +316,55 @@ def sync(path: str) -> dict:
     cur.execute("SELECT lugar_uuid, nombre_real FROM bgstats.lugares_nombre_override")
     nombre_override_lugares = {str(uuid).lower(): nombre for uuid, nombre in cur.fetchall()}
 
-    # jugadores
+    # jugadores — BG Stats permite etiquetar jugadores con tags tipo "Player"
+    # (ej. "Reformers", "Cartoneros", "Cul", "Cdmx") que Alberto ya usa para
+    # agrupar por grupo social/ciudad de origen; se guarda el primero como
+    # grupo_social, feature del modelo de duracion (correlacion mas fuerte
+    # que la de lugar: rango 18.7-50.8 min segun grupo, sesion 2026-08-11).
+    tags_player = {t["id"]: t["name"] for t in data.get("tags", []) if t.get("type") == "Player"}
     for p in data["players"]:
         nombre_final = nombre_override_jugadores.get(
             p["uuid"].lower(), limpiar_nombre_prefijo(p["name"])
         )
+        tags_p = [tags_player[t["tagRefId"]] for t in p.get("tags", []) if t.get("tagRefId") in tags_player]
+        grupo_social = tags_p[0] if tags_p else None
         cur.execute(
             """
             INSERT INTO bgstats.jugadores (uuid, bg_stats_id, nombre, es_anonimo, bgg_username,
-                                            modification_date, datos_extra)
-            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                                            modification_date, datos_extra, grupo_social)
+            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s)
             ON CONFLICT (uuid) DO UPDATE SET
                 nombre = EXCLUDED.nombre, es_anonimo = EXCLUDED.es_anonimo,
                 bgg_username = EXCLUDED.bgg_username, modification_date = EXCLUDED.modification_date,
-                datos_extra = EXCLUDED.datos_extra
+                datos_extra = EXCLUDED.datos_extra, grupo_social = EXCLUDED.grupo_social
             """,
             (
                 p["uuid"], p["id"], nombre_final, parse_bool(p.get("isAnonymous")),
                 p.get("bggUsername") or None,
-                p.get("modificationDate"), json.dumps(p),
+                p.get("modificationDate"), json.dumps(p), grupo_social,
             ),
         )
     jugador_id_a_uuid = {p["id"]: p["uuid"] for p in data["players"]}
 
-    # lugares
+    # lugares — BG Stats permite etiquetar lugares con tags tipo "Location"
+    # (ej. "Cafe", "Fuera", "Vacaciones") que Alberto ya usa para categorizar
+    # donde juega; se guardan tal cual para usarse como feature del modelo
+    # de duracion (jugar en cafe vs. en casa vs. de viaje).
+    tags_location = {t["id"]: t["name"] for t in data.get("tags", []) if t.get("type") == "Location"}
     for l in data["locations"]:
         nombre_final = nombre_override_lugares.get(l["uuid"].lower(), l["name"])
+        tags_l = [
+            tags_location[t["tagRefId"]] for t in l.get("tags", []) if t.get("tagRefId") in tags_location
+        ] or None
         cur.execute(
             """
-            INSERT INTO bgstats.lugares (uuid, bg_stats_id, nombre, modification_date, datos_extra)
-            VALUES (%s, %s, %s, %s, %s::jsonb)
+            INSERT INTO bgstats.lugares (uuid, bg_stats_id, nombre, modification_date, datos_extra, tags_ubicacion)
+            VALUES (%s, %s, %s, %s, %s::jsonb, %s)
             ON CONFLICT (uuid) DO UPDATE SET
                 nombre = EXCLUDED.nombre, modification_date = EXCLUDED.modification_date,
-                datos_extra = EXCLUDED.datos_extra
+                datos_extra = EXCLUDED.datos_extra, tags_ubicacion = EXCLUDED.tags_ubicacion
             """,
-            (l["uuid"], l["id"], nombre_final, l.get("modificationDate"), json.dumps(l)),
+            (l["uuid"], l["id"], nombre_final, l.get("modificationDate"), json.dumps(l), tags_l),
         )
     lugar_id_a_uuid = {l["id"]: l["uuid"] for l in data["locations"]}
 

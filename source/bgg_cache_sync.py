@@ -86,6 +86,11 @@ def parse_item(item: ET.Element) -> dict:
     desc_el = item.find("description")
     descripcion = desc_el.text if desc_el is not None else None
 
+    def rating_attr(tag):
+        el = item.find(f"statistics/ratings/{tag}")
+        val = el.get("value") if el is not None else None
+        return float(val) if val not in (None, "") else None
+
     return {
         "bgg_id": int(item.get("id")),
         "descripcion": descripcion,
@@ -96,6 +101,9 @@ def parse_item(item: ET.Element) -> dict:
         "max_playtime": int(attr("maxplaytime")) if attr("maxplaytime") else None,
         "min_age": int(attr("minage")) if attr("minage") else None,
         "imagen_url": attr("image", key=None),
+        "calificacion_promedio": rating_attr("average"),
+        "calificacion_bayes": rating_attr("bayesaverage"),
+        "num_calificaciones": int(rating_attr("usersrated")) if rating_attr("usersrated") is not None else None,
         "numero_jugadores_sugerido": parse_suggested_numplayers(item),
         "dependencia_idioma": parse_language_dependence(item),
     }
@@ -120,8 +128,9 @@ def sync() -> dict:
                 INSERT INTO bgg_data.juegos_detalle
                     (bgg_id, descripcion, categorias, mecanicas, peso_complejidad,
                      min_playtime, max_playtime, min_age, imagen_url,
-                     numero_jugadores_sugerido, dependencia_idioma, sincronizado_en)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, now())
+                     numero_jugadores_sugerido, dependencia_idioma,
+                     calificacion_promedio, calificacion_bayes, num_calificaciones, sincronizado_en)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, now())
                 ON CONFLICT (bgg_id) DO UPDATE SET
                     descripcion = EXCLUDED.descripcion, categorias = EXCLUDED.categorias,
                     mecanicas = EXCLUDED.mecanicas, peso_complejidad = EXCLUDED.peso_complejidad,
@@ -129,6 +138,9 @@ def sync() -> dict:
                     min_age = EXCLUDED.min_age, imagen_url = EXCLUDED.imagen_url,
                     numero_jugadores_sugerido = EXCLUDED.numero_jugadores_sugerido,
                     dependencia_idioma = EXCLUDED.dependencia_idioma,
+                    calificacion_promedio = EXCLUDED.calificacion_promedio,
+                    calificacion_bayes = EXCLUDED.calificacion_bayes,
+                    num_calificaciones = EXCLUDED.num_calificaciones,
                     sincronizado_en = EXCLUDED.sincronizado_en
                 """,
                 (
@@ -136,7 +148,8 @@ def sync() -> dict:
                     d["peso_complejidad"], d["min_playtime"], d["max_playtime"],
                     d["min_age"], d["imagen_url"],
                     json.dumps(d["numero_jugadores_sugerido"]) if d["numero_jugadores_sugerido"] else None,
-                    d["dependencia_idioma"],
+                    d["dependencia_idioma"], d["calificacion_promedio"],
+                    d["calificacion_bayes"], d["num_calificaciones"],
                 ),
             )
             guardados += 1

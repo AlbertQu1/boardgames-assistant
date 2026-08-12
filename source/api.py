@@ -50,6 +50,7 @@ from source.query_test import search
 from source.bgstats_sync import limpiar_nombre_prefijo, sync as bgstats_sync
 from source.calendario_sync import sync as calendario_sync
 from source.pdf_pipeline import index_pdf
+from source.duracion_model import entrenar as entrenar_duracion, predecir as predecir_duracion
 
 load_dotenv()
 
@@ -638,7 +639,7 @@ def bgstats_propios_sin_jugar():
         """
         SELECT nombre, min_jugadores, max_jugadores, min_duracion_min, max_duracion_min, rating
         FROM bgstats.juegos j
-        WHERE es_propio
+        WHERE es_propio AND NOT es_expansion
           AND NOT EXISTS (SELECT 1 FROM bgstats.partidas p WHERE p.juego_uuid = j.uuid)
           AND NOT EXISTS (SELECT 1 FROM bgstats.partidas p WHERE j.uuid = ANY(p.expansiones_usadas))
         ORDER BY nombre
@@ -663,19 +664,20 @@ def bgstats_coleccion():
 
     cur.execute(
         """
-        SELECT ROUND(SUM(price_paid_mxn) FILTER (WHERE status_owned AND categoria_compra IS DISTINCT FROM 'regalo')::numeric, 2),
-               COUNT(*) FILTER (WHERE status_owned),
-               COUNT(*) FILTER (WHERE status_prev_owned AND NOT status_owned),
-               COUNT(*) FILTER (WHERE status_wishlist)
-        FROM bgstats.colecciones
+        SELECT ROUND(SUM(c.price_paid_mxn) FILTER (WHERE c.status_owned AND c.categoria_compra IS DISTINCT FROM 'regalo')::numeric, 2),
+               COUNT(*) FILTER (WHERE c.status_owned AND NOT j.es_expansion),
+               COUNT(*) FILTER (WHERE c.status_prev_owned AND NOT c.status_owned AND NOT j.es_expansion),
+               COUNT(*) FILTER (WHERE c.status_wishlist)
+        FROM bgstats.colecciones c
+        JOIN bgstats.juegos j ON j.uuid = c.juego_uuid
         """
     )
     gasto_total, copias_propias, copias_ya_no_tiene, en_wishlist = cur.fetchone()
 
     cur.execute(
         """
-        SELECT COUNT(*) FILTER (WHERE es_propio),
-               COUNT(*) FILTER (WHERE es_propio AND NOT EXISTS (
+        SELECT COUNT(*) FILTER (WHERE es_propio AND NOT es_expansion),
+               COUNT(*) FILTER (WHERE es_propio AND NOT es_expansion AND NOT EXISTS (
                    SELECT 1 FROM bgstats.partidas p WHERE p.juego_uuid = j.uuid
                ) AND NOT EXISTS (
                    SELECT 1 FROM bgstats.partidas p WHERE j.uuid = ANY(p.expansiones_usadas)
@@ -723,6 +725,98 @@ def bgstats_coleccion():
         "juegos_propios_sin_jugar": juegos_propios_sin_jugar,
         "por_categoria": por_categoria,
         "top_fuentes": top_fuentes,
+    }
+
+
+@app.get("/bgstats/duracion/juegos")
+def bgstats_duracion_juegos():
+    """Juegos con datos de BGG cacheados (los unicos que se pueden predecir)."""
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT j.nombre, j.min_jugadores, j.max_jugadores
+        FROM bgstats.juegos j
+        JOIN bgg_data.juegos_detalle d ON d.bgg_id = j.bgg_id
+        WHERE d.peso_complejidad IS NOT NULL AND NOT j.es_expansion
+        ORDER BY j.nombre
+        """
+    )
+    result = [{"nombre": r[0], "min_jugadores": r[1], "max_jugadores": r[2]} for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return result
+
+
+@app.get("/bgstats/duracion/entrenamiento")
+def bgstats_duracion_entrenamiento():
+    """Diagnostico del modelo de duracion: MAE de cada candidato, MAE del
+    baseline (promedio simple) para comparar, y coeficientes activos."""
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    r = entrenar_duracion(conn)
+    conn.close()
+    if r is None:
+        raise HTTPException(status_code=422, detail="No hay suficientes datos para entrenar el modelo")
+    return {
+        "n": r["n"],
+        "ganador": r["ganador"],
+        "mae_por_modelo": {k: round(v, 1) for k, v in r["mae_por_modelo"].items()},
+        "mae_baseline": round(r["mae_baseline"], 1),
+        "coeficientes": {k: round(v, 2) for k, v in r["coeficientes"].items()},
+    }
+
+
+@app.get("/bgstats/duracion/predecir")
+def bgstats_duracion_predecir(
+    juego: str, num_jugadores: int, lugar_categoria: str | None = None, grupo_social: str | None = None,
+    usa_expansion: bool = False,
+):
+    """Predice duracion_min para un juego (por nombre) + numero de
+    jugadores + categoria de lugar opcional (ver duracion_model.CATEGORIAS_LUGAR)
+    + grupo social opcional (ver duracion_model.CATEGORIAS_GRUPO). temp_media_c
+    y tag_digital usan el valor tipico (mediana) ya que no se conocen de
+    antemano para una partida futura."""
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT d.peso_complejidad, d.dependencia_idioma, d.min_playtime, d.max_playtime, d.calificacion_promedio
+        FROM bgstats.juegos j
+        JOIN bgg_data.juegos_detalle d ON d.bgg_id = j.bgg_id
+        WHERE j.nombre = %s
+        LIMIT 1
+        """,
+        (juego,),
+    )
+    fila = cur.fetchone()
+    if fila is None:
+        conn.close()
+        raise HTTPException(status_code=404, detail=f"'{juego}' no tiene datos de BGG cacheados")
+
+    r = entrenar_duracion(conn)
+    conn.close()
+    if r is None:
+        raise HTTPException(status_code=422, detail="No hay suficientes datos para entrenar el modelo")
+
+    peso, dependencia, min_pt, max_pt, calificacion = fila
+    estimado = predecir_duracion(
+        r,
+        {
+            "peso_complejidad": peso,
+            "dependencia_idioma": dependencia,
+            "calificacion_promedio": calificacion,
+            "num_jugadores": num_jugadores,
+            "min_playtime": min_pt,
+            "max_playtime": max_pt,
+            "usa_expansion": float(usa_expansion),
+        },
+        categoria_lugar=lugar_categoria,
+        grupo_social=grupo_social,
+    )
+    return {
+        "juego": juego, "num_jugadores": num_jugadores,
+        "lugar_categoria": lugar_categoria, "grupo_social": grupo_social,
+        "duracion_estimada_min": round(estimado), "mae_modelo": round(r["mae_por_modelo"][r["ganador"]], 1),
     }
 
 
