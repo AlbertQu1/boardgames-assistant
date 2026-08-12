@@ -377,12 +377,12 @@ FILTRO_NO_BOT = "COALESCE(pj.nombre_anonimo, j.nombre) NOT LIKE '%%🤖%%'"
 
 @app.get("/bgstats/companeros")
 def bgstats_companeros(modo: str = "jugadores"):
-    """modo=jugadores (default): companeros reales, con nombre propio (Frank,
-    Jairo...) o desconocidos identificados por partida (xJairo, etc), excluye
-    el cajon generico "Jugador anonimo" (gente al azar de la que no se guardo
-    nombre, poco probable volver a ver) y a los oponentes automa/bot (esos
+    """modo=jugadores (default): solo companeros ligados a un jugador real
+    (jugador_uuid, con perfil en bgstats.jugadores) — excluye nombres sueltos
+    de texto libre por partida (nombre_anonimo, ej. "Frank Munoz", "Jairo"),
+    el cajon generico "Jugador anonimo", y a los oponentes automa/bot (esos
     salen en /bgstats/top-juegos?modo=solo, agrupados por juego).
-    modo=todos: companeros reales + el cajon generico + bots.
+    modo=todos: lo anterior + los nombres de texto libre + el cajon generico + bots.
     """
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
@@ -395,7 +395,7 @@ def bgstats_companeros(modo: str = "jugadores"):
         LEFT JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
         WHERE COALESCE(pj.nombre_anonimo, j.nombre) IS NOT NULL
           AND COALESCE(pj.nombre_anonimo, j.nombre) != %s
-          AND (%s OR (pj.nombre_anonimo IS NOT NULL OR j.nombre != %s) AND {FILTRO_NO_BOT})
+          AND (%s OR (pj.nombre_anonimo IS NULL AND j.nombre != %s AND {FILTRO_NO_BOT}))
         """,
         (MI_NOMBRE, modo == "todos", JUGADOR_ANONIMO_GENERICO),
     )
@@ -627,6 +627,35 @@ def bgstats_top_lugares(limite: int = 15):
     return result
 
 
+@app.get("/bgstats/propios-sin-jugar")
+def bgstats_propios_sin_jugar():
+    """Juegos propios (es_propio) sin ninguna partida directa ni usados como
+    expansion en otra partida — la lista detras del numero que muestra
+    /bgstats/coleccion en juegos_propios_sin_jugar."""
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT nombre, min_jugadores, max_jugadores, min_duracion_min, max_duracion_min, rating
+        FROM bgstats.juegos j
+        WHERE es_propio
+          AND NOT EXISTS (SELECT 1 FROM bgstats.partidas p WHERE p.juego_uuid = j.uuid)
+          AND NOT EXISTS (SELECT 1 FROM bgstats.partidas p WHERE j.uuid = ANY(p.expansiones_usadas))
+        ORDER BY nombre
+        """
+    )
+    result = [
+        {
+            "nombre": r[0], "min_jugadores": r[1], "max_jugadores": r[2],
+            "min_duracion_min": r[3], "max_duracion_min": r[4], "rating": r[5],
+        }
+        for r in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return result
+
+
 @app.get("/bgstats/coleccion")
 def bgstats_coleccion():
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
@@ -648,6 +677,8 @@ def bgstats_coleccion():
         SELECT COUNT(*) FILTER (WHERE es_propio),
                COUNT(*) FILTER (WHERE es_propio AND NOT EXISTS (
                    SELECT 1 FROM bgstats.partidas p WHERE p.juego_uuid = j.uuid
+               ) AND NOT EXISTS (
+                   SELECT 1 FROM bgstats.partidas p WHERE j.uuid = ANY(p.expansiones_usadas)
                ))
         FROM bgstats.juegos j
         """
