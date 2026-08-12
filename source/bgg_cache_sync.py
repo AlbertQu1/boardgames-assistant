@@ -14,6 +14,7 @@ Uso:
     python source/bgg_cache_sync.py
 """
 
+import json
 import os
 import time
 import xml.etree.ElementTree as ET
@@ -43,6 +44,36 @@ def fetch_batch(ids: list[int], token: str) -> ET.Element:
     return ET.fromstring(resp.content)
 
 
+def parse_suggested_numplayers(item: ET.Element) -> dict | None:
+    poll = item.find("poll[@name='suggested_numplayers']")
+    if poll is None or int(poll.get("totalvotes", "0")) == 0:
+        return None
+    out = {}
+    for results in poll.findall("results"):
+        numplayers = results.get("numplayers")
+        votos = {r.get("value"): int(r.get("numvotes")) for r in results.findall("result")}
+        out[numplayers] = {
+            "best": votos.get("Best", 0),
+            "recommended": votos.get("Recommended", 0),
+            "not_recommended": votos.get("Not Recommended", 0),
+        }
+    return out or None
+
+
+def parse_language_dependence(item: ET.Element) -> float | None:
+    poll = item.find("poll[@name='language_dependence']")
+    if poll is None or int(poll.get("totalvotes", "0")) == 0:
+        return None
+    total_votos = 0
+    suma_ponderada = 0
+    for r in poll.findall("results/result"):
+        nivel = int(r.get("level"))
+        votos = int(r.get("numvotes"))
+        suma_ponderada += nivel * votos
+        total_votos += votos
+    return round(suma_ponderada / total_votos, 3) if total_votos else None
+
+
 def parse_item(item: ET.Element) -> dict:
     def attr(tag, key="value", default=None):
         el = item.find(tag)
@@ -65,6 +96,8 @@ def parse_item(item: ET.Element) -> dict:
         "max_playtime": int(attr("maxplaytime")) if attr("maxplaytime") else None,
         "min_age": int(attr("minage")) if attr("minage") else None,
         "imagen_url": attr("image", key=None),
+        "numero_jugadores_sugerido": parse_suggested_numplayers(item),
+        "dependencia_idioma": parse_language_dependence(item),
     }
 
 
@@ -86,19 +119,24 @@ def sync() -> dict:
                 """
                 INSERT INTO bgg_data.juegos_detalle
                     (bgg_id, descripcion, categorias, mecanicas, peso_complejidad,
-                     min_playtime, max_playtime, min_age, imagen_url, sincronizado_en)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                     min_playtime, max_playtime, min_age, imagen_url,
+                     numero_jugadores_sugerido, dependencia_idioma, sincronizado_en)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, now())
                 ON CONFLICT (bgg_id) DO UPDATE SET
                     descripcion = EXCLUDED.descripcion, categorias = EXCLUDED.categorias,
                     mecanicas = EXCLUDED.mecanicas, peso_complejidad = EXCLUDED.peso_complejidad,
                     min_playtime = EXCLUDED.min_playtime, max_playtime = EXCLUDED.max_playtime,
                     min_age = EXCLUDED.min_age, imagen_url = EXCLUDED.imagen_url,
+                    numero_jugadores_sugerido = EXCLUDED.numero_jugadores_sugerido,
+                    dependencia_idioma = EXCLUDED.dependencia_idioma,
                     sincronizado_en = EXCLUDED.sincronizado_en
                 """,
                 (
                     d["bgg_id"], d["descripcion"], d["categorias"], d["mecanicas"],
                     d["peso_complejidad"], d["min_playtime"], d["max_playtime"],
                     d["min_age"], d["imagen_url"],
+                    json.dumps(d["numero_jugadores_sugerido"]) if d["numero_jugadores_sugerido"] else None,
+                    d["dependencia_idioma"],
                 ),
             )
             guardados += 1

@@ -437,3 +437,8 @@ if __name__ == "__main__":
         )
         for f in counts["fuentes_compra_sin_normalizar"]:
             print(f"  - {f}")
+
+    print("\nCacheando datos de BGG para juegos nuevos...")
+    from bgg_cache_sync import sync as sync_bgg
+
+    print(f"Sincronizado (BGG): {sync_bgg()}")
