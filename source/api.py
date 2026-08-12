@@ -634,7 +634,7 @@ def bgstats_coleccion():
 
     cur.execute(
         """
-        SELECT ROUND(SUM(price_paid_mxn)::numeric, 2),
+        SELECT ROUND(SUM(price_paid_mxn) FILTER (WHERE status_owned)::numeric, 2),
                COUNT(*) FILTER (WHERE status_owned),
                COUNT(*) FILTER (WHERE status_prev_owned AND NOT status_owned),
                COUNT(*) FILTER (WHERE status_wishlist)
@@ -658,7 +658,7 @@ def bgstats_coleccion():
         """
         SELECT categoria_compra, ROUND(SUM(price_paid_mxn)::numeric, 2), COUNT(*)
         FROM bgstats.colecciones
-        WHERE categoria_compra IS NOT NULL
+        WHERE categoria_compra IS NOT NULL AND status_owned
         GROUP BY categoria_compra
         ORDER BY 2 DESC NULLS LAST
         """
@@ -671,7 +671,7 @@ def bgstats_coleccion():
         """
         SELECT fuente_compra, ROUND(SUM(price_paid_mxn)::numeric, 2), COUNT(*)
         FROM bgstats.colecciones
-        WHERE fuente_compra IS NOT NULL
+        WHERE fuente_compra IS NOT NULL AND status_owned
         GROUP BY fuente_compra
         ORDER BY 2 DESC NULLS LAST
         LIMIT 8
