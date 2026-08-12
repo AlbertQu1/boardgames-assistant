@@ -52,10 +52,12 @@ def parse_item(item: ET.Element) -> dict:
     mecanicas = [l.get("value") for l in item.findall("link[@type='boardgamemechanic']")]
     peso_el = item.find("statistics/ratings/averageweight")
     peso = float(peso_el.get("value")) if peso_el is not None and peso_el.get("value") else None
+    desc_el = item.find("description")
+    descripcion = desc_el.text if desc_el is not None else None
 
     return {
         "bgg_id": int(item.get("id")),
-        "descripcion": attr("description"),
+        "descripcion": descripcion,
         "categorias": categorias or None,
         "mecanicas": mecanicas or None,
         "peso_complejidad": peso,
