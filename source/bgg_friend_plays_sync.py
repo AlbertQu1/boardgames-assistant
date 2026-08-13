@@ -39,7 +39,7 @@ PLAYS_URL = "https://boardgamegeek.com/xmlapi2/plays"
 # variantes de nombre encontradas hasta ahora en logs de amigos (sesion
 # 2026-08-13) -- si aparece una nueva variante, agregarla aqui
 MI_NOMBRE = "Alberto Qu"
-NOMBRES_ALBERTO = {"Albert Qu", "Albert Qu (Kinky)", MI_NOMBRE}
+NOMBRES_ALBERTO = {"Albert Qu", "Albert Qu (Kinky)", MI_NOMBRE, "HL Albert Q", "Alberto ET"}
 
 
 def parse_play(play: ET.Element) -> dict:
