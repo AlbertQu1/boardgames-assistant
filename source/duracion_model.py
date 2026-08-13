@@ -91,11 +91,13 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
         # memoria, aqui, para entrenar un modelo mas robusto). Clima es un
         # proxy general de CDMX por fecha (bgg_data.clima_cdmx_diario, no por
         # lugar exacto -- no tenemos coordenadas de "Entreturnos"/"Mojo Dojo"
-        # de este lado). grupo_social se infiere via bgg_data.jugadores_identificados
-        # (personas que se confirmaron a mano como las mismas que ya conoce
-        # Alberto, ej. "Pablo"/"Rubens"/"Vinicio" -- Reformers) cruzando CUALQUIER
-        # jugador listado en esa partida; si ninguno matchea, queda NULL y el
-        # entrenamiento rellena con la mediana como cualquier otro dato faltante.
+        # de este lado). grupo_social sale primero de bgg_data.ubicaciones_amigos_alias
+        # .grupo_social_lugar (ej. "Global Excel"/"Trabajo" -> GEM, el lugar ya
+        # implica el grupo aunque el jugador no matchee) y si no hay eso, de
+        # bgg_data.jugadores_identificados (personas confirmadas a mano como
+        # las mismas que ya conoce Alberto, ej. "Pablo"/"Rubens"/"Vinicio" ->
+        # Reformers) cruzando cualquier jugador listado; si nada matchea, queda
+        # NULL y el entrenamiento rellena con la mediana como dato faltante.
         cur.execute(
             """
             SELECT pa.duracion_min, d.peso_complejidad, d.dependencia_idioma,
@@ -103,16 +105,20 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
                    jsonb_array_length(pa.jugadores) AS num_jugadores,
                    d.min_playtime, d.max_playtime, FALSE AS tag_digital, FALSE AS usa_expansion,
                    pa.categoria_lugar,
-                   (
-                       SELECT ji.grupo_social
-                       FROM jsonb_array_elements(pa.jugadores) jug
-                       JOIN bgg_data.jugadores_identificados ji
-                           ON ji.nombre_variante = LOWER(TRIM(jug->>'nombre'))
-                       LIMIT 1
+                   COALESCE(
+                       ua.grupo_social_lugar,
+                       (
+                           SELECT ji.grupo_social
+                           FROM jsonb_array_elements(pa.jugadores) jug
+                           JOIN bgg_data.jugadores_identificados ji
+                               ON ji.nombre_variante = LOWER(TRIM(jug->>'nombre'))
+                           LIMIT 1
+                       )
                    ) AS grupo_social
             FROM bgg_data.plays_amigos pa
             JOIN bgg_data.juegos_detalle d ON d.bgg_id = pa.bgg_game_id
             LEFT JOIN bgg_data.clima_cdmx_diario cc ON cc.fecha = pa.fecha
+            LEFT JOIN bgg_data.ubicaciones_amigos_alias ua ON ua.ubicacion_raw = pa.ubicacion
             WHERE pa.usable_para_analisis AND pa.duracion_min > 0 AND d.peso_complejidad IS NOT NULL
             """
         )
