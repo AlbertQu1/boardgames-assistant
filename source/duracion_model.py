@@ -51,6 +51,9 @@ CATEGORIAS_LUGAR = [
 CATEGORIAS_GRUPO = [
     "Reformers", "Solo", "Pup", "Cartoneros", "GEM", "Cdmx", "Otros", "Extra", "Cul", "Entreturnos",
     "Cun", "Gdl",  # grupos chicos hoy (13/5 partidas) pero reales, pueden crecer
+    "Ex",  # gente con la que Alberto ya no tiene contacto (recuperado via partida_grupo_social_override
+           # de jugadores anonimizados en BG Stats, ej. Jairo/Frank Munoz). Entrena el modelo pero no
+           # debe aparecer como opcion elegible en el picker de prediccion del frontend.
 ]
 FEATURES = FEATURES_BASE + [f"lugar_{c}" for c in CATEGORIAS_LUGAR] + [f"grupo_{g}" for g in CATEGORIAS_GRUPO]
 
