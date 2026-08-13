@@ -104,13 +104,20 @@ TOOLS = types.Tool(
                 "rating, quantity) — una fila por copia fisica de un juego; usar para preguntas de cuanto "
                 "ha gastado (SUM(price_paid_mxn)), en donde suele comprar (GROUP BY fuente_compra), que "
                 "tiene en wishlist, que ya no tiene (status_owned=false AND status_prev_owned=true)\n"
-                "- bgstats.jugadores(uuid, nombre, es_anonimo, bgg_username)\n"
+                "- bgstats.jugadores(uuid, nombre, es_anonimo, bgg_username, grupo_social — circulo "
+                "social/ciudad del jugador ej. 'Reformers', 'GEM', 'Cdmx', 'Cul', 'Cartoneros', 'Pup', "
+                "'Entreturnos', 'Ex' (gente con la que ya no hay contacto, no recomendar invitarla), "
+                "'Evento' (conocidos en convenciones), puede ser NULL)\n"
                 "- bgstats.lugares(uuid, nombre, lat, lon, direccion_referencia) — lat/lon puede ser NULL, "
                 "no todos los lugares tienen coordenadas todavia\n"
                 "- bgstats.partidas(uuid, juego_uuid, lugar_uuid, fecha, duracion_min, comentarios, "
                 "usa_equipos, expansiones_usadas)\n"
                 "- bgstats.partida_jugadores(partida_uuid, jugador_uuid, nombre_anonimo, puntaje, "
                 "posicion, gano, orden_asiento)\n"
+                "- bgstats.partida_grupo_social_override(partida_uuid, grupo_social) — cuando un jugador "
+                "se anonimiza en BG Stats pierde su grupo_social; esta tabla lo preserva por partida. "
+                "Para el grupo_social real de una partida siempre usar COALESCE(override.grupo_social, "
+                "jugadores.grupo_social) via LEFT JOIN a esta tabla por partida_uuid, no solo jugadores\n"
                 "- bgstats.clima_diario(lugar_uuid, fecha, temp_media_c, precipitacion_mm) — clima "
                 "historico por lugar+dia, unir con partidas via lugar_uuid y fecha::date = fecha\n"
                 "- bgstats.calendario_eventos(tipo — 'visita' o 'vacacion', nombre, fecha_inicio, fecha_fin, "
@@ -119,7 +126,31 @@ TOOLS = types.Tool(
                 "preguntas de cuanto se juega cuando alguien visita, o que se jugo en vacaciones: unir con "
                 "partidas via p.fecha::date BETWEEN ce.fecha_inicio AND (ce.fecha_fin - INTERVAL '1 day')\n"
                 "Nota: 'Ticket to Ride' (el base) tiene es_expansion=true por un dato asi de BGG, "
-                "no asumir que es_expansion=false significa 'juego base jugable'."
+                "no asumir que es_expansion=false significa 'juego base jugable'.\n\n"
+                "Tablas de amigos (schema bgg_data) — partidas que amigos de Alberto registraron directo "
+                "en BGG, NUNCA se fusionan con bgstats.partidas, se combinan solo con JOIN/UNION en la "
+                "consulta misma:\n"
+                "- bgg_data.juegos_detalle(bgg_id, categorias — array texto tipo BGG ej. 'Medical', "
+                "'Economic', mecanicas — array texto ej. 'Worker Placement', 'Rondel', peso_complejidad "
+                "— 1 a 5, calificacion_promedio, min_playtime, max_playtime) — cache de metadata BGG para "
+                "TODOS los juegos, propios y de amigos; unir bgstats.juegos.bgg_id o "
+                "bgg_data.plays_amigos.bgg_game_id contra esta tabla para complejidad/categorias/mecanicas\n"
+                "- bgg_data.plays_amigos(bgg_play_id, bgg_username, fecha, juego, bgg_game_id, ubicacion, "
+                "ubicacion_normalizada, categoria_lugar, duracion_min, jugadores — jsonb array de objetos "
+                "{nombre, username}, usable_para_analisis — SIEMPRE filtrar WHERE usable_para_analisis) "
+                "— usar jsonb_array_elements(jugadores) para expandir jugadores por partida\n"
+                "- bgg_data.jugadores_identificados(nombre_variante — en minusculas/trim, persona_real, "
+                "grupo_social) — cruza nombres crudos de jugadores de plays_amigos con personas reales que "
+                "Alberto conoce; unir jsonb_array_elements(jugadores)->>'nombre' con LOWER(TRIM(...)) = "
+                "nombre_variante\n"
+                "- bgg_data.ubicaciones_amigos_alias(ubicacion_raw, ubicacion_normalizada, categoria_lugar, "
+                "grupo_social_lugar, lat, lon) — grupo_social_lugar tiene prioridad sobre "
+                "jugadores_identificados cuando ambos aplican (ej. jugar en 'Global Excel' siempre implica "
+                "grupo GEM aunque el jugador no matchee)\n"
+                "Para 'quien jugaria X' o 'que grupo le gusta X': cruzar categorias/mecanicas/"
+                "peso_complejidad del juego en juegos_detalle contra lo que cada grupo_social ya jugo "
+                "(bgstats + amigos), no solo por categoria/tema — el peso/mecanicas predicen mejor el "
+                "interes real que la tematica."
             ),
             parameters=types.Schema(
                 type="OBJECT",
@@ -1005,7 +1036,15 @@ def ask(req: AskRequest):
             f"busqueda) tambien cuentan como parte de {req.juego}."
         )
 
+    MAX_ITERACIONES_HERRAMIENTAS = 5
+    iteraciones = 0
     while True:
+        iteraciones += 1
+        if iteraciones > MAX_ITERACIONES_HERRAMIENTAS:
+            raise HTTPException(
+                status_code=502,
+                detail="El modelo no pudo responder tras varios intentos de consulta. Intenta reformular la pregunta.",
+            )
         try:
             response = gemini.models.generate_content(
                 model=GEMINI_MODEL,
