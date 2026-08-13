@@ -40,6 +40,11 @@ CATEGORIAS_LUGAR = ["casa_propia", "cafe", "fuera", "evento", "amigos", "exparej
 # grupo_social: tags "Player" que ya existian en BG Stats (Reformers, Cartoneros,
 # GEM, Cul/Cdmx/Gdl por ciudad, etc). Senal aun mas fuerte que categoria_lugar
 # en la validacion (rango 18.7-50.8 min segun grupo vs. 19-47.8 de lugar).
+# Se calcula con JOIN en vivo a bgstats.jugadores.grupo_social, no queda
+# congelado por partida — si alguien se vuelve anonimo en BG Stats (perfil
+# se fusiona al generico compartido, sin tag), sus partidas historicas
+# pierden la senal salvo que haya una fila en partida_grupo_social_override
+# (ver bgstats.partida_grupo_social_override, poblada a mano caso por caso).
 CATEGORIAS_GRUPO = ["Reformers", "Solo", "Pup", "Cartoneros", "GEM", "Cdmx", "Otros", "Extra", "Cul", "Entreturnos"]
 FEATURES = FEATURES_BASE + [f"lugar_{c}" for c in CATEGORIAS_LUGAR] + [f"grupo_{g}" for g in CATEGORIAS_GRUPO]
 
@@ -54,17 +59,21 @@ def cargar_datos(conn) -> list[tuple]:
                d.min_playtime, d.max_playtime, p.tag_digital,
                (p.expansiones_usadas IS NOT NULL AND array_length(p.expansiones_usadas, 1) > 0) AS usa_expansion,
                l.categoria_lugar,
-               (
-                   SELECT mode() WITHIN GROUP (ORDER BY jg.grupo_social)
-                   FROM bgstats.partida_jugadores pj2
-                   JOIN bgstats.jugadores jg ON jg.uuid = pj2.jugador_uuid
-                   WHERE pj2.partida_uuid = p.uuid AND jg.grupo_social IS NOT NULL
+               COALESCE(
+                   gso.grupo_social,
+                   (
+                       SELECT mode() WITHIN GROUP (ORDER BY jg.grupo_social)
+                       FROM bgstats.partida_jugadores pj2
+                       JOIN bgstats.jugadores jg ON jg.uuid = pj2.jugador_uuid
+                       WHERE pj2.partida_uuid = p.uuid AND jg.grupo_social IS NOT NULL
+                   )
                ) AS grupo_social
         FROM bgstats.partidas p
         JOIN bgstats.juegos j ON j.uuid = p.juego_uuid
         JOIN bgg_data.juegos_detalle d ON d.bgg_id = j.bgg_id
         LEFT JOIN bgstats.clima_diario c ON c.lugar_uuid = p.lugar_uuid AND c.fecha = p.fecha::date
         LEFT JOIN bgstats.lugares l ON l.uuid = p.lugar_uuid
+        LEFT JOIN bgstats.partida_grupo_social_override gso ON gso.partida_uuid = p.uuid
         WHERE p.duracion_min > 0 AND d.peso_complejidad IS NOT NULL
         """
     )
