@@ -54,6 +54,9 @@ CATEGORIAS_GRUPO = [
     "Ex",  # gente con la que Alberto ya no tiene contacto (recuperado via partida_grupo_social_override
            # de jugadores anonimizados en BG Stats, ej. Jairo/Frank Munoz). Entrena el modelo pero no
            # debe aparecer como opcion elegible en el picker de prediccion del frontend.
+    "Evento", "Mty",  # inferidos via partida_grupo_social_override a partir de partidas mixtas/sin
+                       # senal (sesion 2026-08-13): Evento = gente conocida en convenciones/expos
+                       # (Mega XP), Mty = circulo de Monterrey.
 ]
 FEATURES = FEATURES_BASE + [f"lugar_{c}" for c in CATEGORIAS_LUGAR] + [f"grupo_{g}" for g in CATEGORIAS_GRUPO]
 
