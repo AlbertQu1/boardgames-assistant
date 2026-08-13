@@ -45,7 +45,10 @@ CATEGORIAS_LUGAR = ["casa_propia", "cafe", "fuera", "evento", "amigos", "exparej
 # se fusiona al generico compartido, sin tag), sus partidas historicas
 # pierden la senal salvo que haya una fila en partida_grupo_social_override
 # (ver bgstats.partida_grupo_social_override, poblada a mano caso por caso).
-CATEGORIAS_GRUPO = ["Reformers", "Solo", "Pup", "Cartoneros", "GEM", "Cdmx", "Otros", "Extra", "Cul", "Entreturnos"]
+CATEGORIAS_GRUPO = [
+    "Reformers", "Solo", "Pup", "Cartoneros", "GEM", "Cdmx", "Otros", "Extra", "Cul", "Entreturnos",
+    "Cun", "Gdl",  # grupos chicos hoy (13/5 partidas) pero reales, pueden crecer
+]
 FEATURES = FEATURES_BASE + [f"lugar_{c}" for c in CATEGORIAS_LUGAR] + [f"grupo_{g}" for g in CATEGORIAS_GRUPO]
 
 
