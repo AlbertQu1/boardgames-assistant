@@ -7,6 +7,7 @@ Uso:
     uvicorn source.api:app --host 0.0.0.0 --port 8000 --reload
 """
 
+import datetime
 import json
 import mimetypes
 import os
@@ -585,7 +586,49 @@ def bgstats_cuando_juegas():
         FROM bgstats.partidas GROUP BY dow ORDER BY dow
         """
     )
-    por_dia_semana = [{"dia": DIAS_SEMANA[dow], "partidas": n} for dow, n in cur.fetchall()]
+    conteo_por_dia = dict(cur.fetchall())
+
+    # probabilidad de jugar por dia de la semana (dias distintos con partida /
+    # dias totales de ese tipo en el rango de fechas) -- separado de conteo de
+    # partidas porque un dia con 5 partidas no es "mas probable" que uno con 1,
+    # y comparado contra la red de amigos (bgg_data.plays_amigos) para ver si
+    # el circulo social en general tiene un patron distinto al propio (sesion
+    # 2026-08-13, union solo en memoria aqui, nunca en Postgres)
+    cur.execute("SELECT DISTINCT fecha::date FROM bgstats.partidas")
+    fechas_propias = set(r[0] for r in cur.fetchall())
+    cur.execute("SELECT DISTINCT fecha FROM bgg_data.plays_amigos WHERE usable_para_analisis")
+    fechas_amigos = set(r[0] for r in cur.fetchall())
+
+    todas_las_fechas = fechas_propias | fechas_amigos
+    por_dia_semana = []
+    if todas_las_fechas:
+        fecha_min, fecha_max = min(todas_las_fechas), max(todas_las_fechas)
+        dias_calendario_por_dow: dict[int, int] = {}
+        d = fecha_min
+        while d <= fecha_max:
+            dow = (d.weekday() + 1) % 7  # python 0=lunes -> postgres 0=domingo
+            dias_calendario_por_dow[dow] = dias_calendario_por_dow.get(dow, 0) + 1
+            d += datetime.timedelta(days=1)
+
+        dias_jugados_propios = {}
+        for f in fechas_propias:
+            dow = (f.weekday() + 1) % 7
+            dias_jugados_propios[dow] = dias_jugados_propios.get(dow, 0) + 1
+        dias_jugados_amigos = {}
+        for f in fechas_amigos:
+            dow = (f.weekday() + 1) % 7
+            dias_jugados_amigos[dow] = dias_jugados_amigos.get(dow, 0) + 1
+
+        for dow in range(7):
+            total_dias = dias_calendario_por_dow.get(dow, 0)
+            por_dia_semana.append(
+                {
+                    "dia": DIAS_SEMANA[dow],
+                    "partidas": conteo_por_dia.get(dow, 0),
+                    "probabilidad": round(dias_jugados_propios.get(dow, 0) / total_dias, 3) if total_dias else 0,
+                    "probabilidad_amigos": round(dias_jugados_amigos.get(dow, 0) / total_dias, 3) if total_dias else 0,
+                }
+            )
 
     cur.execute(
         """
