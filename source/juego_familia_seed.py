@@ -14,7 +14,10 @@ Europe + Europa 15th Anniversary, que Alberto confirmo que SI es el mismo).
 
 Este script es un registro de que se corrio, no re-corre nada automatico
 en cada sync -- la tabla se edita a mano via Postgres directo cuando
-aparece una familia nueva.
+aparece una familia nueva. Como es por bgg_id (no especifica a bgstats),
+tambien cruza con bgg_data.plays_amigos -- de ahi salieron 2 ediciones que
+Alberto no tiene el mismo pero sus amigos si juegan (Everdell: Collector's
+Edition, The Castles of Burgundy edicion original bgg_id 84876).
 
 Uso (una sola vez, o para volver a aplicar despues de un DROP):
     python source/juego_familia_seed.py
@@ -34,6 +37,7 @@ FAMILIAS = [
     # Everdell (Farshore EXCLUIDO -- es otro juego, confirmado)
     (199792, "Everdell", "Everdell"),
     (332398, "Everdell", "Everdell: The Complete Collection"),
+    (319422, "Everdell", "Everdell: Collector's Edition"),
     # Terraforming Mars (familia completa: base + big box + expansiones)
     (167791, "Terraforming Mars", "Terraforming Mars"),
     (311247, "Terraforming Mars", "Terraforming Mars: Big Box"),
@@ -69,6 +73,7 @@ FAMILIAS = [
     (432527, "Ethnos", "Ethnos: 2nd Edition"),
     (271320, "The Castles of Burgundy", "The Castles of Burgundy"),
     (363622, "The Castles of Burgundy", "The Castles of Burgundy: Special Edition"),
+    (84876, "The Castles of Burgundy", "The Castles of Burgundy (edicion original)"),
     (14996, "Ticket to Ride: Europe", "Ticket to Ride: Europe"),
     (329841, "Ticket to Ride: Europe", "Ticket to Ride: Europa – 15th Anniversary"),
     (39856, "Dixit", "Dixit"),
