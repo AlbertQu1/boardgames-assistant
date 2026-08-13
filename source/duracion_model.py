@@ -88,10 +88,12 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
     if incluir_amigos:
         # bgg_data.plays_amigos (partidas de amigos registradas directo en BGG,
         # NUNCA se fusiona con bgstats.partidas en Postgres — union solo en
-        # memoria, aqui, para entrenar un modelo mas robusto). Clima es un
-        # proxy general de CDMX por fecha (bgg_data.clima_cdmx_diario, no por
-        # lugar exacto -- no tenemos coordenadas de "Entreturnos"/"Mojo Dojo"
-        # de este lado). grupo_social sale primero de bgg_data.ubicaciones_amigos_alias
+        # memoria, aqui, para entrenar un modelo mas robusto). Clima usa el
+        # lugar exacto cuando existe (bgg_data.clima_ubicacion_diario, lugares
+        # con lat/lon heredado de bgstats.lugares o geocodificado a mano) y
+        # cae al proxy general de CDMX (bgg_data.clima_cdmx_diario) cuando el
+        # lugar no esta geolocalizado (ej. casas de amigos sin coords).
+        # grupo_social sale primero de bgg_data.ubicaciones_amigos_alias
         # .grupo_social_lugar (ej. "Global Excel"/"Trabajo" -> GEM, el lugar ya
         # implica el grupo aunque el jugador no matchee) y si no hay eso, de
         # bgg_data.jugadores_identificados (personas confirmadas a mano como
@@ -101,7 +103,8 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
         cur.execute(
             """
             SELECT pa.duracion_min, d.peso_complejidad, d.dependencia_idioma,
-                   cc.temp_media_c, d.calificacion_promedio,
+                   COALESCE(cu.temp_media_c, cc.temp_media_c) AS temp_media_c,
+                   d.calificacion_promedio,
                    jsonb_array_length(pa.jugadores) AS num_jugadores,
                    d.min_playtime, d.max_playtime, FALSE AS tag_digital, FALSE AS usa_expansion,
                    pa.categoria_lugar,
@@ -117,8 +120,10 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
                    ) AS grupo_social
             FROM bgg_data.plays_amigos pa
             JOIN bgg_data.juegos_detalle d ON d.bgg_id = pa.bgg_game_id
-            LEFT JOIN bgg_data.clima_cdmx_diario cc ON cc.fecha = pa.fecha
             LEFT JOIN bgg_data.ubicaciones_amigos_alias ua ON ua.ubicacion_raw = pa.ubicacion
+            LEFT JOIN bgg_data.clima_ubicacion_diario cu
+                ON cu.ubicacion_normalizada = pa.ubicacion_normalizada AND cu.fecha = pa.fecha
+            LEFT JOIN bgg_data.clima_cdmx_diario cc ON cc.fecha = pa.fecha
             WHERE pa.usable_para_analisis AND pa.duracion_min > 0 AND d.peso_complejidad IS NOT NULL
             """
         )
