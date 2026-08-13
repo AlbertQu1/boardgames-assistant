@@ -36,7 +36,10 @@ FEATURES_BASE = [
 # columna propia. Mejora el MAE solo un poco (~0.1 min) una vez combinado
 # con las demas features, pero la direccion de los coeficientes coincide
 # con las diferencias reales de duracion promedio por categoria.
-CATEGORIAS_LUGAR = ["casa_propia", "cafe", "fuera", "evento", "amigos", "expareja", "pareja"]
+CATEGORIAS_LUGAR = [
+    "casa_propia", "cafe", "fuera", "evento", "amigos", "expareja", "pareja",
+    "otros",  # casas del circulo social de un amigo (ej. Vinicio via BGG), no necesariamente el de Alberto
+]
 # grupo_social: tags "Player" que ya existian en BG Stats (Reformers, Cartoneros,
 # GEM, Cul/Cdmx/Gdl por ciudad, etc). Senal aun mas fuerte que categoria_lugar
 # en la validacion (rango 18.7-50.8 min segun grupo vs. 19-47.8 de lugar).
