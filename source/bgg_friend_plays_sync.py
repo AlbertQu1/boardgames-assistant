@@ -108,6 +108,26 @@ def es_partida_propia(jugadores: list[dict]) -> bool:
     return any(j["nombre"] in NOMBRES_ALBERTO for j in jugadores)
 
 
+# patrones de nombre de bots/Automa encontrados en logs de amigos (sesion 2026-08-13):
+# "B_<algo>" (bots de modo solitario tipo Automa con prefijo por juego, ej. "B_FormulaD Am2"),
+# "Automa" a secas, y "Bot <algo>" (ej. "Bot T-800"). Si aparece alguno, es partida en modo
+# solitario contra la IA del juego, no multijugador real -- afecta duracion_min y num_jugadores.
+def es_partida_solo(jugadores: list[dict]) -> bool:
+    return any(
+        j["nombre"].startswith("B_") or j["nombre"].lower() == "automa" or j["nombre"].lower().startswith("bot ")
+        for j in jugadores
+    )
+
+
+# plataformas digitales encontradas como ubicacion en logs de amigos (sesion 2026-08-13):
+# "BGA" = Board Game Arena. Si aparece una nueva variante agregarla aqui.
+UBICACIONES_DIGITALES = {"bga", "board game arena", "tabletopia", "tabletop simulator"}
+
+
+def es_partida_digital(ubicacion: str | None) -> bool:
+    return bool(ubicacion) and ubicacion.strip().lower() in UBICACIONES_DIGITALES
+
+
 def sync(username: str) -> dict:
     token = os.environ["BGG_API_TOKEN"]
     plays = fetch_all_plays(username, token)
@@ -119,14 +139,17 @@ def sync(username: str) -> dict:
     for p in plays:
         ubic_norm, categoria = normalizar_ubicacion(p["ubicacion"], alias)
         propia = es_partida_propia(p["jugadores"])
+        solo = es_partida_solo(p["jugadores"])
+        digital = es_partida_digital(p["ubicacion"])
         usable = (not p["incompleta"]) and (not propia)
         cur.execute(
             """
             INSERT INTO bgg_data.plays_amigos
                 (bgg_play_id, bgg_username, fecha, juego, bgg_game_id, ubicacion,
                  comentarios, duracion_min, cantidad, incompleta, jugadores, datos_extra,
-                 ubicacion_normalizada, categoria_lugar, es_partida_propia, usable_para_analisis)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s)
+                 ubicacion_normalizada, categoria_lugar, es_partida_propia, usable_para_analisis,
+                 tag_solo, tag_digital)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (bgg_play_id) DO UPDATE SET
                 fecha = EXCLUDED.fecha, juego = EXCLUDED.juego, bgg_game_id = EXCLUDED.bgg_game_id,
                 ubicacion = EXCLUDED.ubicacion, comentarios = EXCLUDED.comentarios,
@@ -136,13 +159,15 @@ def sync(username: str) -> dict:
                 ubicacion_normalizada = EXCLUDED.ubicacion_normalizada,
                 categoria_lugar = EXCLUDED.categoria_lugar,
                 es_partida_propia = EXCLUDED.es_partida_propia,
-                usable_para_analisis = EXCLUDED.usable_para_analisis
+                usable_para_analisis = EXCLUDED.usable_para_analisis,
+                tag_solo = EXCLUDED.tag_solo,
+                tag_digital = EXCLUDED.tag_digital
             """,
             (
                 p["bgg_play_id"], username, p["fecha"], p["juego"], p["bgg_game_id"], p["ubicacion"],
                 p["comentarios"], p["duracion_min"], p["cantidad"], p["incompleta"],
                 json.dumps(p["jugadores"]), json.dumps(p["datos_extra"]),
-                ubic_norm, categoria, propia, usable,
+                ubic_norm, categoria, propia, usable, solo, digital,
             ),
         )
     conn.commit()

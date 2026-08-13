@@ -28,7 +28,7 @@ load_dotenv()
 
 FEATURES_BASE = [
     "peso_complejidad", "dependencia_idioma", "temp_media_c", "calificacion_promedio",
-    "num_jugadores", "min_playtime", "max_playtime", "tag_digital", "usa_expansion",
+    "num_jugadores", "min_playtime", "max_playtime", "tag_digital", "usa_expansion", "tag_solo",
 ]
 # categoria_lugar: diccionario armado a mano con Alberto (sesion 2026-08-11)
 # cruzando tags "Location" de BG Stats donde existian + contexto que el sabe
@@ -38,7 +38,10 @@ FEATURES_BASE = [
 # con las diferencias reales de duracion promedio por categoria.
 CATEGORIAS_LUGAR = [
     "casa_propia", "cafe", "fuera", "evento", "amigos", "expareja", "pareja",
-    "otros",  # casas del circulo social de un amigo (ej. Vinicio via BGG), no necesariamente el de Alberto
+    "otros",  # catch-all real, sin patron identificable
+    "reuniones",  # casa/depa/cueva de alguien del circulo de un amigo (bgg_data), separado de
+                  # "otros" para no inflar ese catch-all -- la mayoria de partidas de amigos
+                  # eran justo este tipo de reunion informal (sesion 2026-08-13)
 ]
 # grupo_social: tags "Player" que ya existian en BG Stats (Reformers, Cartoneros,
 # GEM, Cul/Cdmx/Gdl por ciudad, etc). Senal aun mas fuerte que categoria_lugar
@@ -70,6 +73,7 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
                (SELECT count(*) FROM bgstats.partida_jugadores pj WHERE pj.partida_uuid = p.uuid) AS num_jugadores,
                d.min_playtime, d.max_playtime, p.tag_digital,
                (p.expansiones_usadas IS NOT NULL AND array_length(p.expansiones_usadas, 1) > 0) AS usa_expansion,
+               p.tag_solo,
                l.categoria_lugar,
                COALESCE(
                    gso.grupo_social,
@@ -111,8 +115,16 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
             SELECT pa.duracion_min, d.peso_complejidad, d.dependencia_idioma,
                    COALESCE(cu.temp_media_c, cc.temp_media_c) AS temp_media_c,
                    d.calificacion_promedio,
-                   jsonb_array_length(pa.jugadores) AS num_jugadores,
-                   d.min_playtime, d.max_playtime, FALSE AS tag_digital, FALSE AS usa_expansion,
+                   (
+                       SELECT count(*) FROM jsonb_array_elements(pa.jugadores) jug
+                       WHERE NOT (
+                           LEFT(jug->>'nombre', 2) = 'B_' OR LOWER(jug->>'nombre') = 'automa'
+                           OR LOWER(jug->>'nombre') LIKE 'bot %'
+                       )
+                   ) AS num_jugadores,
+                   d.min_playtime, d.max_playtime, COALESCE(pa.tag_digital, FALSE) AS tag_digital,
+                   FALSE AS usa_expansion,
+                   COALESCE(pa.tag_solo, FALSE) AS tag_solo,
                    pa.categoria_lugar,
                    COALESCE(
                        ua.grupo_social_lugar,
@@ -153,7 +165,8 @@ def entrenar(conn, incluir_amigos: bool = False):
     x_raw = np.array(
         [
             fila_con_categoria(
-                [f[1], f[2], f[3], f[4], f[5], f[6], f[7], float(bool(f[8])), float(bool(f[9]))], f[10], f[11]
+                [f[1], f[2], f[3], f[4], f[5], f[6], f[7], float(bool(f[8])), float(bool(f[9])), float(bool(f[10]))],
+                f[11], f[12],
             )
             for f in filas
         ],
