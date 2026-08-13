@@ -34,6 +34,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# debe coincidir con bgg_friend_plays_sync.MI_NOMBRE -- no se importa directo
+# porque este archivo se carga tanto como script suelto (python source/bgstats_sync.py,
+# sys.path[0]=source/) como submodulo del paquete source (uvicorn source.api:app,
+# sys.path[0]=raiz del repo), y un import a nivel de modulo solo funciona en uno de los dos.
+MI_NOMBRE = "Alberto Qu"
+
 
 def parse_bool(v) -> bool:
     return bool(v)
@@ -346,13 +352,33 @@ def sync(path: str) -> dict:
         )
     jugador_id_a_uuid = {p["id"]: p["uuid"] for p in data["players"]}
 
+    # alerta en la app: bgg_username nuevo detectado en este sync (viene del
+    # campo bggUsername nativo de BG Stats, no de descarga automatica de
+    # partidas -- eso sigue siendo manual via bgg_friend_plays_sync.py). Se
+    # marca "revisado" desde el badge de la app una vez que Alberto lo ve.
+    cur.execute(
+        """
+        INSERT INTO bgg_data.amigos_nuevos_pendientes (bgg_username, jugador_nombre, jugador_uuid)
+        SELECT DISTINCT ON (j.bgg_username) j.bgg_username, j.nombre, j.uuid
+        FROM bgstats.jugadores j
+        WHERE j.bgg_username IS NOT NULL AND TRIM(j.bgg_username) != '' AND j.nombre != %s
+        ON CONFLICT (bgg_username) DO NOTHING
+        RETURNING bgg_username
+        """,
+        (MI_NOMBRE,),
+    )
+    amigos_bgg_nuevos = [r[0] for r in cur.fetchall()]
+
     # lugares — BG Stats permite etiquetar lugares con tags tipo "Location"
     # (ej. "Cafe", "Fuera", "Vacaciones") que Alberto ya usa para categorizar
     # donde juega; se guardan tal cual para usarse como feature del modelo
     # de duracion (jugar en cafe vs. en casa vs. de viaje).
     tags_location = {t["id"]: t["name"] for t in data.get("tags", []) if t.get("type") == "Location"}
+    lugares_nuevos = set()
     for l in data["locations"]:
         nombre_final = nombre_override_lugares.get(l["uuid"].lower(), l["name"])
+        if nombre_final and nombre_final.strip().lower() not in lugares_por_nombre:
+            lugares_nuevos.add(nombre_final.strip())
         tags_l = [
             tags_location[t["tagRefId"]] for t in l.get("tags", []) if t.get("tagRefId") in tags_location
         ] or None
@@ -365,6 +391,25 @@ def sync(path: str) -> dict:
                 datos_extra = EXCLUDED.datos_extra, tags_ubicacion = EXCLUDED.tags_ubicacion
             """,
             (l["uuid"], l["id"], nombre_final, l.get("modificationDate"), json.dumps(l), tags_l),
+        )
+
+    # alerta en la app: fuente de compra sin normalizar (no matcheo ningun alias
+    # ni lugar existente, ver normalizar_fuente_compra) o lugar de partida nuevo
+    # (nombre que no existia antes de este sync) -- ambos necesitan revision manual
+    # (agregar alias en bgstats.fuentes_compra_alias, o categoria_lugar en
+    # bgstats.lugares). Mismo patron que bgg_data.amigos_nuevos_pendientes: se
+    # inserta una vez, se limpia desde el badge de la app, no se re-alerta si
+    # ya se reviso aunque el sync lo siga trayendo sin normalizar.
+    for tipo, valor in [("compra", f) for f in fuentes_sin_normalizar] + [
+        ("lugar_partida", l) for l in lugares_nuevos
+    ]:
+        cur.execute(
+            """
+            INSERT INTO bgstats.lugares_pendientes_revision (tipo, valor)
+            VALUES (%s, %s)
+            ON CONFLICT (tipo, valor) DO NOTHING
+            """,
+            (tipo, valor),
         )
     lugar_id_a_uuid = {l["id"]: l["uuid"] for l in data["locations"]}
 
@@ -431,6 +476,8 @@ def sync(path: str) -> dict:
         "lugares": len(data["locations"]),
         "partidas": len(data["plays"]),
         "fuentes_compra_sin_normalizar": sorted(fuentes_sin_normalizar),
+        "lugares_nuevos": sorted(lugares_nuevos),
+        "amigos_bgg_nuevos": amigos_bgg_nuevos,
     }
     cur.close()
     conn.close()
@@ -451,6 +498,10 @@ if __name__ == "__main__":
         )
         for f in counts["fuentes_compra_sin_normalizar"]:
             print(f"  - {f}")
+    if counts["lugares_nuevos"]:
+        print(f"Lugares de partida nuevos detectados (alerta en la app): {counts['lugares_nuevos']}")
+    if counts["amigos_bgg_nuevos"]:
+        print(f"Amigos nuevos con usuario de BGG detectados (alerta en la app): {counts['amigos_bgg_nuevos']}")
 
     print("\nCacheando datos de BGG para juegos nuevos...")
     from bgg_cache_sync import sync as sync_bgg

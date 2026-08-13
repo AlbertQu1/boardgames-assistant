@@ -824,6 +824,93 @@ def bgstats_duracion_predecir(
     }
 
 
+@app.get("/bgstats/amigos/pendientes")
+def bgstats_amigos_pendientes():
+    """Amigos con bgg_username detectado en el ultimo sync de BG Stats que
+    aun no se han revisado (ver bgg_data.amigos_nuevos_pendientes, poblada por
+    bgstats_sync.py en cada corrida). El frontend los muestra como alerta y
+    limpia la bandera via /bgstats/amigos/pendientes/{bgg_username}/revisar."""
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT bgg_username, jugador_nombre, detectado_en
+        FROM bgg_data.amigos_nuevos_pendientes
+        WHERE NOT revisado
+        ORDER BY detectado_en
+        """
+    )
+    result = [
+        {"bgg_username": r[0], "jugador_nombre": r[1], "detectado_en": r[2].isoformat()}
+        for r in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return result
+
+
+@app.post("/bgstats/amigos/pendientes/{bgg_username}/revisar")
+def bgstats_amigo_revisar(bgg_username: str):
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE bgg_data.amigos_nuevos_pendientes SET revisado = TRUE, revisado_en = now() WHERE bgg_username = %s",
+        (bgg_username,),
+    )
+    conn.commit()
+    encontrado = cur.rowcount > 0
+    cur.close()
+    conn.close()
+    if not encontrado:
+        raise HTTPException(status_code=404, detail=f"No existe {bgg_username} en pendientes")
+    return {"bgg_username": bgg_username, "revisado": True}
+
+
+@app.get("/bgstats/lugares/pendientes")
+def bgstats_lugares_pendientes():
+    """Fuentes de compra sin alias o lugares de partida nuevos detectados en
+    el ultimo sync (ver bgstats.lugares_pendientes_revision, poblada por
+    bgstats_sync.py). tipo es 'compra' o 'lugar_partida'. El frontend los
+    muestra como alerta y limpia la bandera via /bgstats/lugares/pendientes/revisar."""
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT tipo, valor, detectado_en
+        FROM bgstats.lugares_pendientes_revision
+        WHERE NOT revisado
+        ORDER BY detectado_en
+        """
+    )
+    result = [
+        {"tipo": r[0], "valor": r[1], "detectado_en": r[2].isoformat()}
+        for r in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return result
+
+
+@app.post("/bgstats/lugares/pendientes/revisar")
+def bgstats_lugar_revisar(tipo: str, valor: str):
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE bgstats.lugares_pendientes_revision SET revisado = TRUE, revisado_en = now()
+        WHERE tipo = %s AND valor = %s
+        """,
+        (tipo, valor),
+    )
+    conn.commit()
+    encontrado = cur.rowcount > 0
+    cur.close()
+    conn.close()
+    if not encontrado:
+        raise HTTPException(status_code=404, detail=f"No existe {tipo}/{valor} en pendientes")
+    return {"tipo": tipo, "valor": valor, "revisado": True}
+
+
 @app.post("/bgstats/sync")
 def bgstats_sync_endpoint():
     if not os.path.exists(BGSTATS_EXPORT_PATH):
