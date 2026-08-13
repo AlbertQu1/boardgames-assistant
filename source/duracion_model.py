@@ -61,7 +61,19 @@ CATEGORIAS_GRUPO = [
                        # senal (sesion 2026-08-13): Evento = gente conocida en convenciones/expos
                        # (Mega XP), Mty = circulo de Monterrey.
 ]
-FEATURES = FEATURES_BASE + [f"lugar_{c}" for c in CATEGORIAS_LUGAR] + [f"grupo_{g}" for g in CATEGORIAS_GRUPO]
+# dia de la semana (0=domingo..6=sabado, igual que EXTRACT(DOW) de Postgres).
+# Se probo a mano antes de agregarlo (sesion 2026-08-13): duracion promedio
+# weekend vs entre semana identica (35 min ambos) -- se deja como feature de
+# todas formas porque con Lasso/ElasticNet un feature sin señal simplemente
+# se pondera a ~0, no le hace daño al modelo, y confirma la conclusion desde
+# adentro del modelo en vez de solo el promedio crudo.
+DIAS_SEMANA = list(range(7))
+FEATURES = (
+    FEATURES_BASE
+    + [f"lugar_{c}" for c in CATEGORIAS_LUGAR]
+    + [f"grupo_{g}" for g in CATEGORIAS_GRUPO]
+    + [f"dia_{d}" for d in DIAS_SEMANA]
+)
 
 
 def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
@@ -83,7 +95,8 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
                        JOIN bgstats.jugadores jg ON jg.uuid = pj2.jugador_uuid
                        WHERE pj2.partida_uuid = p.uuid AND jg.grupo_social IS NOT NULL
                    )
-               ) AS grupo_social
+               ) AS grupo_social,
+               EXTRACT(DOW FROM p.fecha)::int AS dia_semana
         FROM bgstats.partidas p
         JOIN bgstats.juegos j ON j.uuid = p.juego_uuid
         JOIN bgg_data.juegos_detalle d ON d.bgg_id = j.bgg_id
@@ -135,7 +148,8 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
                                ON ji.nombre_variante = LOWER(TRIM(jug->>'nombre'))
                            LIMIT 1
                        )
-                   ) AS grupo_social
+                   ) AS grupo_social,
+                   EXTRACT(DOW FROM pa.fecha)::int AS dia_semana
             FROM bgg_data.plays_amigos pa
             JOIN bgg_data.juegos_detalle d ON d.bgg_id = pa.bgg_game_id
             LEFT JOIN bgg_data.ubicaciones_amigos_alias ua ON ua.ubicacion_raw = pa.ubicacion
@@ -150,10 +164,13 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
     return filas
 
 
-def fila_con_categoria(base: list, categoria_lugar: str | None, grupo_social: str | None) -> list:
+def fila_con_categoria(
+    base: list, categoria_lugar: str | None, grupo_social: str | None, dia_semana: int | None = None
+) -> list:
     dummies_lugar = [1.0 if categoria_lugar == c else 0.0 for c in CATEGORIAS_LUGAR]
     dummies_grupo = [1.0 if grupo_social == g else 0.0 for g in CATEGORIAS_GRUPO]
-    return base + dummies_lugar + dummies_grupo
+    dummies_dia = [1.0 if dia_semana == d else 0.0 for d in DIAS_SEMANA]
+    return base + dummies_lugar + dummies_grupo + dummies_dia
 
 
 def entrenar(conn, incluir_amigos: bool = False):
@@ -166,7 +183,7 @@ def entrenar(conn, incluir_amigos: bool = False):
         [
             fila_con_categoria(
                 [f[1], f[2], f[3], f[4], f[5], f[6], f[7], float(bool(f[8])), float(bool(f[9])), float(bool(f[10]))],
-                f[11], f[12],
+                f[11], f[12], f[13],
             )
             for f in filas
         ],
@@ -217,11 +234,15 @@ def predecir(
     valores: dict,
     categoria_lugar: str | None = None,
     grupo_social: str | None = None,
+    dia_semana: int | None = None,
 ) -> float:
     for c in CATEGORIAS_LUGAR:
         valores.setdefault(f"lugar_{c}", 1.0 if categoria_lugar == c else 0.0)
     for g in CATEGORIAS_GRUPO:
         valores.setdefault(f"grupo_{g}", 1.0 if grupo_social == g else 0.0)
+    if dia_semana is not None:
+        for d in DIAS_SEMANA:
+            valores.setdefault(f"dia_{d}", 1.0 if dia_semana == d else 0.0)
     fila = np.array([[valores.get(f, np.nan) for f in FEATURES]], dtype=float)
     inds = np.where(np.isnan(fila))
     fila[inds] = np.take(resultado_entrenamiento["medianas"], inds[1])
