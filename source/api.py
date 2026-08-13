@@ -13,6 +13,8 @@ import os
 import re
 import shutil
 
+import requests
+
 HEDGE_JUEGO_LINEA_RE = re.compile(
     r"^\s*(no especificaste|no indicaste|por favor,? especifica|para poder (ayudarte|explicarte)"
     r"|indica (el nombre|de qu[eé]))"
@@ -801,6 +803,27 @@ def bgstats_duracion_entrenamiento(incluir_amigos: bool = False):
     }
 
 
+# mismas coords de "Casa" reusadas en todo el proyecto (coffee, clima_sync.py,
+# bgg_friend_clima_sync.py) -- la mayoria de las partidas propias son ahi
+CASA_LAT, CASA_LON = 19.4326, -99.1332
+
+
+def obtener_temperatura_actual() -> float | None:
+    """Clima real AHORA (Open-Meteo forecast, no historico) para la prediccion
+    de duracion. Si falla (API caida, timeout), regresa None y predecir_duracion
+    cae de vuelta a la mediana historica -- nunca debe tumbar la prediccion."""
+    try:
+        resp = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={"latitude": CASA_LAT, "longitude": CASA_LON, "current": "temperature_2m"},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return resp.json()["current"]["temperature_2m"]
+    except (requests.RequestException, KeyError, ValueError):
+        return None
+
+
 @app.get("/bgstats/duracion/predecir")
 def bgstats_duracion_predecir(
     juego: str, num_jugadores: int, lugar_categoria: str | None = None, grupo_social: str | None = None,
@@ -809,8 +832,9 @@ def bgstats_duracion_predecir(
     """Predice duracion_min para un juego (por nombre) + numero de
     jugadores + categoria de lugar opcional (ver duracion_model.CATEGORIAS_LUGAR)
     + grupo social opcional (ver duracion_model.CATEGORIAS_GRUPO). temp_media_c
-    y tag_digital usan el valor tipico (mediana) ya que no se conocen de
-    antemano para una partida futura."""
+    usa el clima real actual (Open-Meteo, coords de Casa) si el request
+    responde a tiempo; si no, cae a la mediana historica. tag_digital usa el
+    valor tipico (mediana) ya que no se conoce de antemano para una partida futura."""
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
     cur.execute(
@@ -834,19 +858,20 @@ def bgstats_duracion_predecir(
         raise HTTPException(status_code=422, detail="No hay suficientes datos para entrenar el modelo")
 
     peso, dependencia, min_pt, max_pt, calificacion = fila
+    valores = {
+        "peso_complejidad": peso,
+        "dependencia_idioma": dependencia,
+        "calificacion_promedio": calificacion,
+        "num_jugadores": num_jugadores,
+        "min_playtime": min_pt,
+        "max_playtime": max_pt,
+        "usa_expansion": float(usa_expansion),
+    }
+    temp_actual = obtener_temperatura_actual()
+    if temp_actual is not None:
+        valores["temp_media_c"] = temp_actual
     estimado = predecir_duracion(
-        r,
-        {
-            "peso_complejidad": peso,
-            "dependencia_idioma": dependencia,
-            "calificacion_promedio": calificacion,
-            "num_jugadores": num_jugadores,
-            "min_playtime": min_pt,
-            "max_playtime": max_pt,
-            "usa_expansion": float(usa_expansion),
-        },
-        categoria_lugar=lugar_categoria,
-        grupo_social=grupo_social,
+        r, valores, categoria_lugar=lugar_categoria, grupo_social=grupo_social,
     )
     return {
         "juego": juego, "num_jugadores": num_jugadores,
