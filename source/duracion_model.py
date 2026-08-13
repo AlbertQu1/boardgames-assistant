@@ -91,16 +91,25 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
         # memoria, aqui, para entrenar un modelo mas robusto). Clima es un
         # proxy general de CDMX por fecha (bgg_data.clima_cdmx_diario, no por
         # lugar exacto -- no tenemos coordenadas de "Entreturnos"/"Mojo Dojo"
-        # de este lado). grupo_social queda NULL (no son jugadores tuyos con
-        # perfil); el entrenamiento rellena con la mediana como cualquier
-        # otro dato faltante.
+        # de este lado). grupo_social se infiere via bgg_data.jugadores_identificados
+        # (personas que se confirmaron a mano como las mismas que ya conoce
+        # Alberto, ej. "Pablo"/"Rubens"/"Vinicio" -- Reformers) cruzando CUALQUIER
+        # jugador listado en esa partida; si ninguno matchea, queda NULL y el
+        # entrenamiento rellena con la mediana como cualquier otro dato faltante.
         cur.execute(
             """
             SELECT pa.duracion_min, d.peso_complejidad, d.dependencia_idioma,
                    cc.temp_media_c, d.calificacion_promedio,
                    jsonb_array_length(pa.jugadores) AS num_jugadores,
                    d.min_playtime, d.max_playtime, FALSE AS tag_digital, FALSE AS usa_expansion,
-                   pa.categoria_lugar, NULL::text AS grupo_social
+                   pa.categoria_lugar,
+                   (
+                       SELECT ji.grupo_social
+                       FROM jsonb_array_elements(pa.jugadores) jug
+                       JOIN bgg_data.jugadores_identificados ji
+                           ON ji.nombre_variante = LOWER(TRIM(jug->>'nombre'))
+                       LIMIT 1
+                   ) AS grupo_social
             FROM bgg_data.plays_amigos pa
             JOIN bgg_data.juegos_detalle d ON d.bgg_id = pa.bgg_game_id
             LEFT JOIN bgg_data.clima_cdmx_diario cc ON cc.fecha = pa.fecha
