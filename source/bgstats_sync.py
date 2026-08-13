@@ -254,9 +254,12 @@ def sync(path: str) -> dict:
             fuente_compra, lugar_compra_uuid, reconocido = normalizar_fuente_compra(
                 acquired_from_raw, alias_compra, lugares_por_nombre
             )
-            if acquired_from_raw and not reconocido:
-                fuentes_sin_normalizar.add(acquired_from_raw.strip())
             categoria_compra = categoria_compra_por_fuente.get(fuente_compra) if fuente_compra else None
+            # solo alertar si de verdad no se sabe nada de esta fuente -- si ya tiene
+            # categoria asignada en fuentes_compra_categoria (aunque no tenga alias,
+            # porque su nombre crudo ya es el canonico), no hace falta revisarla
+            if acquired_from_raw and not reconocido and categoria_compra is None:
+                fuentes_sin_normalizar.add(acquired_from_raw.strip())
 
             acquisition_date = parse_date(md.get("AcquisitionDate"))
             inventory_date = parse_date(md.get("InventoryDate"))
