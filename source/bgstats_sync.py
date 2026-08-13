@@ -584,3 +584,8 @@ if __name__ == "__main__":
     from bgg_friend_plays_sync import sync_todos_los_amigos
 
     print(f"Sincronizado (amigos BGG): {sync_todos_los_amigos()}")
+
+    print("\nActualizando grafo social (Apache AGE)...")
+    from grafo_social_sync import sync as sync_grafo
+
+    print(f"Sincronizado (grafo social): {sync_grafo()}")

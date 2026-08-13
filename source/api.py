@@ -53,7 +53,11 @@ from source.query_test import search
 from source.bgstats_sync import limpiar_nombre_prefijo, sync as bgstats_sync
 from source.calendario_sync import sync as calendario_sync
 from source.pdf_pipeline import index_pdf
+from source.bgg_cache_sync import sync as bgg_cache_sync
+from source.bgg_friend_plays_sync import sync_todos_los_amigos
+from source.grafo_social_sync import sync as grafo_social_sync
 from source.duracion_model import entrenar as entrenar_duracion, predecir as predecir_duracion
+from source.duracion_solo_model import entrenar as entrenar_duracion_solo, predecir as predecir_duracion_solo
 
 load_dotenv()
 
@@ -150,6 +154,17 @@ TOOLS = types.Tool(
                 "grupo_social_lugar, lat, lon) — grupo_social_lugar tiene prioridad sobre "
                 "jugadores_identificados cuando ambos aplican (ej. jugar en 'Global Excel' siempre implica "
                 "grupo GEM aunque el jugador no matchee)\n"
+                "- bgg_data.juego_familia(bgg_id, familia, nombre) — agrupa ediciones/reimpresiones que son "
+                "la MISMA experiencia de juego (ej. Everdell y Everdell: The Complete Collection son bgg_id "
+                "distintos pero 'familia'='Everdell'). Usar SIEMPRE que pregunten por el historial/duracion "
+                "real de un juego especifico: unir bgstats.juegos.bgg_id o bgg_data.plays_amigos.bgg_game_id "
+                "contra esta tabla por bgg_id, agrupar por familia, y sumar/promediar sobre TODOS los bgg_id "
+                "de esa familia en vez de solo el bgg_id exacto — si no se hace esto se pierden partidas "
+                "registradas bajo una edicion hermana. Ojo: no todas las variantes de una marca son la misma "
+                "familia (ej. Everdell Farshore es un juego distinto, no esta en la familia 'Everdell'; "
+                "distintos mapas de Ticket to Ride tampoco se agrupan salvo Europe con Europa 15th "
+                "Anniversary) — si un juego no aparece en esta tabla, es porque nunca se agrupo (usar su "
+                "propio bgg_id solo, no asumir).\n"
                 "Para 'quien jugaria X' o 'que grupo le gusta X': cruzar categorias/mecanicas/"
                 "peso_complejidad del juego en juegos_detalle contra lo que cada grupo_social ya jugo "
                 "(bgstats + amigos), no solo por categoria/tema — el peso/mecanicas predicen mejor el "
@@ -923,6 +938,76 @@ def bgstats_duracion_predecir(
     }
 
 
+@app.get("/bgstats/duracion-solo/entrenamiento")
+def bgstats_duracion_solo_entrenamiento():
+    """Diagnostico del modelo de duracion en MODO SOLITARIO (tag_solo=true),
+    ver duracion_solo_model.py. Dataset mas chico (~199 filas) que el modelo
+    normal, feature set mas simple (sin lugar/grupo social, casi todo solo
+    es en casa)."""
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    r = entrenar_duracion_solo(conn)
+    conn.close()
+    if r is None:
+        raise HTTPException(status_code=422, detail="No hay suficientes datos para entrenar el modelo")
+    return {
+        "n": r["n"],
+        "ganador": r["ganador"],
+        "mae_por_modelo": {k: round(v, 1) for k, v in r["mae_por_modelo"].items()},
+        "mae_baseline": round(r["mae_baseline"], 1),
+        "coeficientes": {k: round(v, 2) for k, v in r["coeficientes"].items()},
+    }
+
+
+@app.get("/bgstats/duracion-solo/predecir")
+def bgstats_duracion_solo_predecir(juego: str):
+    """Predice duracion_min para un juego (por nombre) en modo solitario.
+    min_jugadores/max_jugadores (BGG) distinguen juegos solo puros (ej.
+    GROVE) de multijugador jugado con Automa (ej. Terraforming Mars) --
+    feature mas fuerte del modelo. temp_media_c usa clima real actual
+    (Open-Meteo) igual que el modelo normal."""
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT d.peso_complejidad, d.min_playtime, d.max_playtime, d.calificacion_promedio,
+               j.min_jugadores, j.max_jugadores
+        FROM bgstats.juegos j
+        JOIN bgg_data.juegos_detalle d ON d.bgg_id = j.bgg_id
+        WHERE j.nombre = %s
+        LIMIT 1
+        """,
+        (juego,),
+    )
+    fila = cur.fetchone()
+    if fila is None:
+        conn.close()
+        raise HTTPException(status_code=404, detail=f"'{juego}' no tiene datos de BGG cacheados")
+
+    r = entrenar_duracion_solo(conn)
+    conn.close()
+    if r is None:
+        raise HTTPException(status_code=422, detail="No hay suficientes datos para entrenar el modelo")
+
+    peso, min_pt, max_pt, calificacion, min_j, max_j = fila
+    valores = {
+        "peso_complejidad": peso,
+        "min_playtime": min_pt,
+        "max_playtime": max_pt,
+        "calificacion_promedio": calificacion,
+        "min_jugadores": min_j,
+        "max_jugadores": max_j,
+    }
+    temp_actual = obtener_temperatura_actual()
+    if temp_actual is not None:
+        valores["temp_media_c"] = temp_actual
+    estimado = predecir_duracion_solo(r, valores)
+    return {
+        "juego": juego,
+        "duracion_estimada_min": round(estimado),
+        "mae_modelo": round(r["mae_por_modelo"][r["ganador"]], 1),
+    }
+
+
 @app.get("/bgstats/amigos/pendientes")
 def bgstats_amigos_pendientes():
     """Amigos con bgg_username detectado en el ultimo sync de BG Stats que
@@ -1079,6 +1164,11 @@ def bgstats_anonimo_revisar(partida_uuid: str, grupo_social: str):
 
 @app.post("/bgstats/sync")
 def bgstats_sync_endpoint():
+    """Sync completo disparado por n8n en cada export nuevo. Encadena, en orden,
+    todo lo que antes solo corria manual via 'python source/bgstats_sync.py':
+    partidas/juegos/jugadores -> cache de BGG -> partidas de amigos -> grafo
+    social. Cada paso extra va en su propio try/except -- si falla (red, API
+    caida) no debe tumbar el sync principal de BG Stats."""
     if not os.path.exists(BGSTATS_EXPORT_PATH):
         raise HTTPException(status_code=404, detail=f"No existe {BGSTATS_EXPORT_PATH}")
     resultado = bgstats_sync(BGSTATS_EXPORT_PATH)
@@ -1088,6 +1178,18 @@ def bgstats_sync_endpoint():
         # los calendarios de iCloud son un extra sobre el sync principal de BG Stats;
         # si fallan (link vencido, red) no debe tumbar la sincronizacion de partidas/juegos
         resultado["calendario_error"] = str(e)
+    try:
+        resultado["bgg_cache"] = bgg_cache_sync()
+    except Exception as e:
+        resultado["bgg_cache_error"] = str(e)
+    try:
+        resultado["amigos_bgg"] = sync_todos_los_amigos()
+    except Exception as e:
+        resultado["amigos_bgg_error"] = str(e)
+    try:
+        resultado["grafo_social"] = grafo_social_sync()
+    except Exception as e:
+        resultado["grafo_social_error"] = str(e)
     return resultado
 
 
