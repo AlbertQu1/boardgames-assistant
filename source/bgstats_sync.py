@@ -470,6 +470,74 @@ def sync(path: str) -> dict:
             )
 
     conn.commit()
+
+    # deteccion automatica de partidas con el jugador anonimo generico que
+    # necesitan grupo_social (ver bgstats.partida_grupo_social_override,
+    # sesion 2026-08-13): si todos los jugadores nombrados en la partida
+    # coinciden en 1 solo grupo, se resuelve solo; si no hay ninguno nombrado
+    # pero el lugar tiene grupo_social_lugar (bgstats.lugares), tambien; lo
+    # demas (mixto o sin señal) se manda al badge de la app para resolver a mano.
+    anonimos_pendientes_nuevos = 0
+    cur.execute("SELECT uuid FROM bgstats.jugadores WHERE es_anonimo = true LIMIT 1")
+    fila_anon = cur.fetchone()
+    if fila_anon:
+        uuid_anon = fila_anon[0]
+        cur.execute(
+            """
+            SELECT DISTINCT p.uuid
+            FROM bgstats.partida_jugadores pj
+            JOIN bgstats.partidas p ON p.uuid = pj.partida_uuid
+            WHERE pj.jugador_uuid = %s
+              AND NOT EXISTS (SELECT 1 FROM bgstats.partida_grupo_social_override o WHERE o.partida_uuid = p.uuid)
+              AND NOT EXISTS (SELECT 1 FROM bgstats.anonimos_pendientes_agrupar a WHERE a.partida_uuid = p.uuid)
+            """,
+            (uuid_anon,),
+        )
+        for (partida_uuid,) in cur.fetchall():
+            cur.execute(
+                """
+                SELECT DISTINCT j.grupo_social
+                FROM bgstats.partida_jugadores pj
+                JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
+                WHERE pj.partida_uuid = %s AND j.grupo_social IS NOT NULL
+                """,
+                (partida_uuid,),
+            )
+            grupos = [r[0] for r in cur.fetchall()]
+            if len(grupos) == 1:
+                cur.execute(
+                    "INSERT INTO bgstats.partida_grupo_social_override (partida_uuid, grupo_social) VALUES (%s, %s)",
+                    (partida_uuid, grupos[0]),
+                )
+                continue
+            if len(grupos) == 0:
+                cur.execute(
+                    """
+                    SELECT l.grupo_social_lugar FROM bgstats.partidas p
+                    LEFT JOIN bgstats.lugares l ON l.uuid = p.lugar_uuid WHERE p.uuid = %s
+                    """,
+                    (partida_uuid,),
+                )
+                grupo_lugar = cur.fetchone()[0]
+                if grupo_lugar:
+                    cur.execute(
+                        "INSERT INTO bgstats.partida_grupo_social_override (partida_uuid, grupo_social) VALUES (%s, %s)",
+                        (partida_uuid, grupo_lugar),
+                    )
+                    continue
+                cur.execute(
+                    "INSERT INTO bgstats.anonimos_pendientes_agrupar (partida_uuid, tipo) VALUES (%s, 'sin_senal')",
+                    (partida_uuid,),
+                )
+                anonimos_pendientes_nuevos += 1
+            else:
+                cur.execute(
+                    "INSERT INTO bgstats.anonimos_pendientes_agrupar (partida_uuid, tipo) VALUES (%s, 'mixto')",
+                    (partida_uuid,),
+                )
+                anonimos_pendientes_nuevos += 1
+        conn.commit()
+
     cur.execute("SELECT COUNT(*) FROM bgstats.colecciones")
     n_colecciones = cur.fetchone()[0]
     counts = {
@@ -481,6 +549,7 @@ def sync(path: str) -> dict:
         "fuentes_compra_sin_normalizar": sorted(fuentes_sin_normalizar),
         "lugares_nuevos": sorted(lugares_nuevos),
         "amigos_bgg_nuevos": amigos_bgg_nuevos,
+        "anonimos_pendientes_nuevos": anonimos_pendientes_nuevos,
     }
     cur.close()
     conn.close()

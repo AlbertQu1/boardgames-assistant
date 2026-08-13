@@ -911,6 +911,73 @@ def bgstats_lugar_revisar(tipo: str, valor: str):
     return {"tipo": tipo, "valor": valor, "revisado": True}
 
 
+@app.get("/bgstats/anonimos/pendientes")
+def bgstats_anonimos_pendientes():
+    """Partidas con el jugador anonimo generico donde no se pudo inferir
+    grupo_social solo (mixto: 2+ grupos entre los nombrados: sin_senal:
+    nadie nombrado tiene grupo ni el lugar tiene grupo_social_lugar). Ver
+    bgstats.anonimos_pendientes_agrupar, poblada por bgstats_sync.py. El
+    frontend deja elegir el grupo y llama a
+    /bgstats/anonimos/pendientes/revisar para resolverlo."""
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT a.partida_uuid, a.tipo, p.fecha, jg.nombre, l.nombre,
+               (
+                   SELECT string_agg(j.nombre || ' (' || j.grupo_social || ')', ', ')
+                   FROM bgstats.partida_jugadores pj
+                   JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
+                   WHERE pj.partida_uuid = a.partida_uuid AND j.grupo_social IS NOT NULL
+               ) AS jugadores_con_grupo
+        FROM bgstats.anonimos_pendientes_agrupar a
+        JOIN bgstats.partidas p ON p.uuid = a.partida_uuid
+        JOIN bgstats.juegos jg ON jg.uuid = p.juego_uuid
+        LEFT JOIN bgstats.lugares l ON l.uuid = p.lugar_uuid
+        WHERE NOT a.revisado
+        ORDER BY a.detectado_en
+        """
+    )
+    result = [
+        {
+            "partida_uuid": str(r[0]), "tipo": r[1], "fecha": r[2].isoformat(),
+            "juego": r[3], "lugar": r[4], "jugadores_con_grupo": r[5],
+        }
+        for r in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return result
+
+
+@app.post("/bgstats/anonimos/pendientes/revisar")
+def bgstats_anonimo_revisar(partida_uuid: str, grupo_social: str):
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO bgstats.partida_grupo_social_override (partida_uuid, grupo_social)
+        VALUES (%s, %s)
+        ON CONFLICT (partida_uuid) DO UPDATE SET grupo_social = EXCLUDED.grupo_social
+        """,
+        (partida_uuid, grupo_social),
+    )
+    cur.execute(
+        """
+        UPDATE bgstats.anonimos_pendientes_agrupar SET revisado = TRUE, revisado_en = now()
+        WHERE partida_uuid = %s
+        """,
+        (partida_uuid,),
+    )
+    conn.commit()
+    encontrado = cur.rowcount > 0
+    cur.close()
+    conn.close()
+    if not encontrado:
+        raise HTTPException(status_code=404, detail=f"No existe {partida_uuid} en pendientes")
+    return {"partida_uuid": partida_uuid, "grupo_social": grupo_social, "revisado": True}
+
+
 @app.post("/bgstats/sync")
 def bgstats_sync_endpoint():
     if not os.path.exists(BGSTATS_EXPORT_PATH):
