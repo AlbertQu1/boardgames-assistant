@@ -55,7 +55,7 @@ CATEGORIAS_GRUPO = [
 FEATURES = FEATURES_BASE + [f"lugar_{c}" for c in CATEGORIAS_LUGAR] + [f"grupo_{g}" for g in CATEGORIAS_GRUPO]
 
 
-def cargar_datos(conn) -> list[tuple]:
+def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
     cur = conn.cursor()
     cur.execute(
         """
@@ -83,7 +83,33 @@ def cargar_datos(conn) -> list[tuple]:
         WHERE p.duracion_min > 0 AND d.peso_complejidad IS NOT NULL
         """
     )
-    return cur.fetchall()
+    filas = cur.fetchall()
+
+    if incluir_amigos:
+        # bgg_data.plays_amigos (partidas de amigos registradas directo en BGG,
+        # NUNCA se fusiona con bgstats.partidas en Postgres — union solo en
+        # memoria, aqui, para entrenar un modelo mas robusto). Clima es un
+        # proxy general de CDMX por fecha (bgg_data.clima_cdmx_diario, no por
+        # lugar exacto -- no tenemos coordenadas de "Entreturnos"/"Mojo Dojo"
+        # de este lado). grupo_social queda NULL (no son jugadores tuyos con
+        # perfil); el entrenamiento rellena con la mediana como cualquier
+        # otro dato faltante.
+        cur.execute(
+            """
+            SELECT pa.duracion_min, d.peso_complejidad, d.dependencia_idioma,
+                   cc.temp_media_c, d.calificacion_promedio,
+                   jsonb_array_length(pa.jugadores) AS num_jugadores,
+                   d.min_playtime, d.max_playtime, FALSE AS tag_digital, FALSE AS usa_expansion,
+                   pa.categoria_lugar, NULL::text AS grupo_social
+            FROM bgg_data.plays_amigos pa
+            JOIN bgg_data.juegos_detalle d ON d.bgg_id = pa.bgg_game_id
+            LEFT JOIN bgg_data.clima_cdmx_diario cc ON cc.fecha = pa.fecha
+            WHERE pa.usable_para_analisis AND pa.duracion_min > 0 AND d.peso_complejidad IS NOT NULL
+            """
+        )
+        filas += cur.fetchall()
+
+    return filas
 
 
 def fila_con_categoria(base: list, categoria_lugar: str | None, grupo_social: str | None) -> list:
@@ -92,8 +118,8 @@ def fila_con_categoria(base: list, categoria_lugar: str | None, grupo_social: st
     return base + dummies_lugar + dummies_grupo
 
 
-def entrenar(conn):
-    filas = cargar_datos(conn)
+def entrenar(conn, incluir_amigos: bool = False):
+    filas = cargar_datos(conn, incluir_amigos=incluir_amigos)
     if len(filas) < 20:
         return None
 

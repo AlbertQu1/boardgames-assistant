@@ -749,11 +749,13 @@ def bgstats_duracion_juegos():
 
 
 @app.get("/bgstats/duracion/entrenamiento")
-def bgstats_duracion_entrenamiento():
+def bgstats_duracion_entrenamiento(incluir_amigos: bool = True):
     """Diagnostico del modelo de duracion: MAE de cada candidato, MAE del
-    baseline (promedio simple) para comparar, y coeficientes activos."""
+    baseline (promedio simple) para comparar, y coeficientes activos.
+    incluir_amigos=True (default) suma partidas de bgg_data.plays_amigos
+    (solo en memoria, esa tabla nunca se fusiona con bgstats.partidas)."""
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
-    r = entrenar_duracion(conn)
+    r = entrenar_duracion(conn, incluir_amigos=incluir_amigos)
     conn.close()
     if r is None:
         raise HTTPException(status_code=422, detail="No hay suficientes datos para entrenar el modelo")
@@ -769,7 +771,7 @@ def bgstats_duracion_entrenamiento():
 @app.get("/bgstats/duracion/predecir")
 def bgstats_duracion_predecir(
     juego: str, num_jugadores: int, lugar_categoria: str | None = None, grupo_social: str | None = None,
-    usa_expansion: bool = False,
+    usa_expansion: bool = False, incluir_amigos: bool = True,
 ):
     """Predice duracion_min para un juego (por nombre) + numero de
     jugadores + categoria de lugar opcional (ver duracion_model.CATEGORIAS_LUGAR)
@@ -793,7 +795,7 @@ def bgstats_duracion_predecir(
         conn.close()
         raise HTTPException(status_code=404, detail=f"'{juego}' no tiene datos de BGG cacheados")
 
-    r = entrenar_duracion(conn)
+    r = entrenar_duracion(conn, incluir_amigos=incluir_amigos)
     conn.close()
     if r is None:
         raise HTTPException(status_code=422, detail="No hay suficientes datos para entrenar el modelo")
