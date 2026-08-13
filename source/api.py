@@ -749,11 +749,13 @@ def bgstats_duracion_juegos():
 
 
 @app.get("/bgstats/duracion/entrenamiento")
-def bgstats_duracion_entrenamiento(incluir_amigos: bool = True):
+def bgstats_duracion_entrenamiento(incluir_amigos: bool = False):
     """Diagnostico del modelo de duracion: MAE de cada candidato, MAE del
     baseline (promedio simple) para comparar, y coeficientes activos.
-    incluir_amigos=True (default) suma partidas de bgg_data.plays_amigos
-    (solo en memoria, esa tabla nunca se fusiona con bgstats.partidas)."""
+    incluir_amigos=False (default): se probo sumar partidas de bgg_data.plays_amigos
+    (union solo en memoria, esa tabla nunca se fusiona con bgstats.partidas) y no
+    mejoro el modelo (MAE 16.28 sin amigos vs 16.58 con amigos, sesion 2026-08-13,
+    muestra chica: ~37 de 1589 filas). Se deja el parametro por si crece la muestra."""
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     r = entrenar_duracion(conn, incluir_amigos=incluir_amigos)
     conn.close()
@@ -771,7 +773,7 @@ def bgstats_duracion_entrenamiento(incluir_amigos: bool = True):
 @app.get("/bgstats/duracion/predecir")
 def bgstats_duracion_predecir(
     juego: str, num_jugadores: int, lugar_categoria: str | None = None, grupo_social: str | None = None,
-    usa_expansion: bool = False, incluir_amigos: bool = True,
+    usa_expansion: bool = False, incluir_amigos: bool = False,
 ):
     """Predice duracion_min para un juego (por nombre) + numero de
     jugadores + categoria de lugar opcional (ver duracion_model.CATEGORIAS_LUGAR)
