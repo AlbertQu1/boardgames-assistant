@@ -456,3 +456,8 @@ if __name__ == "__main__":
     from bgg_cache_sync import sync as sync_bgg
 
     print(f"Sincronizado (BGG): {sync_bgg()}")
+
+    print("\nBuscando amigos con usuario de BGG y descargando sus partidas (staging, no se fusiona)...")
+    from bgg_friend_plays_sync import sync_todos_los_amigos
+
+    print(f"Sincronizado (amigos BGG): {sync_todos_los_amigos()}")
