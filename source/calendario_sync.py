@@ -102,6 +102,12 @@ def sync() -> dict:
     cur.execute("SELECT nombre, uuid FROM boardgames_stats.jugadores WHERE NOT es_anonimo")
     jugador_por_nombre = {nombre.strip().lower(): uuid for nombre, uuid in cur.fetchall()}
 
+    # alias manuales para nombres de visita que no coinciden exacto con el
+    # jugador real (ej. "Angel ulises" -> "Angel U") -- se checan primero,
+    # asi sobreviven a re-syncs en vez de tener que reaplicarse a mano cada vez
+    cur.execute("SELECT alias, jugador_uuid FROM boardgames_stats.visita_nombre_alias")
+    alias_por_nombre = {alias.strip().lower(): uuid for alias, uuid in cur.fetchall()}
+
     hoy_date = date.today()
     hoy = hoy_date.strftime("%Y%m%d")  # mismo formato que fecha_inicio (YYYYMMDD, sin guiones)
 
@@ -119,7 +125,11 @@ def sync() -> dict:
                 continue
             # fecha_fin es exclusiva (el dia despues del ultimo dia real);
             # se guarda el rango tal cual, la resta se hace al consultar.
-            jugador_uuid = jugador_por_nombre.get(ev["nombre"].strip().lower()) if tipo == "visita" else None
+            nombre_lower = ev["nombre"].strip().lower()
+            jugador_uuid = (
+                alias_por_nombre.get(nombre_lower) or jugador_por_nombre.get(nombre_lower)
+                if tipo == "visita" else None
+            )
             cur.execute(
                 """
                 INSERT INTO boardgames_stats.calendario_eventos (tipo, nombre, fecha_inicio, fecha_fin, jugador_uuid)
