@@ -1,10 +1,12 @@
 """
-Trae eventos de visitas (calendario personal de iCloud, publicado como ICS)
-y de vacaciones (tabla vacation_trips de la app Vacaciones, DB separada)
-para poder correlacionar partidas con vacaciones fuera de casa o con
-visitas de personas especificas. Liga automaticamente un evento de
-"visita" a un jugador existente en boardgames_stats.jugadores si el nombre
-coincide (ej. "Paul"). Idempotente (upsert por tipo+nombre+rango de fechas).
+Trae eventos de visitas (dos fuentes: calendario personal de iCloud
+publicado como ICS, y tabla home_visits de la app Vacaciones -- misma DB
+que vacation_trips, permite registrar una visita directo en la app sin
+depender del calendario) y de vacaciones (tabla vacation_trips) para poder
+correlacionar partidas con vacaciones fuera de casa o con visitas de
+personas especificas. Liga automaticamente un evento de "visita" a un
+jugador existente en boardgames_stats.jugadores si el nombre coincide (ej.
+"Paul"). Idempotente (upsert por tipo+nombre+rango de fechas).
 
 Uso:
     python source/calendario_sync.py
@@ -48,6 +50,28 @@ def fetch_ical_events(url: str) -> list[dict]:
     return eventos
 
 
+def fetch_home_visits(hoy: date) -> list[dict]:
+    """Lee home_visits de la DB de la app Vacaciones (misma DB que
+    vacation_trips, tabla nueva) -- segunda fuente de eventos tipo='visita'
+    ademas del calendario de iCloud, para poder registrar una visita desde
+    la app directamente sin depender de tener el evento en el calendario."""
+    conn = psycopg2.connect(os.environ.get("VACATION_DB_URL", "postgresql://albertqu@/vacaciones"))
+    cur = conn.cursor()
+    cur.execute("SELECT visitor_name, arrival_date, departure_date FROM home_visits WHERE arrival_date <= %s", (hoy,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    return [
+        {
+            "nombre": nombre,
+            "fecha_inicio": llegada.strftime("%Y%m%d"),
+            "fecha_fin": (salida + timedelta(days=1)).strftime("%Y%m%d"),
+        }
+        for nombre, llegada, salida in rows
+    ]
+
+
 def fetch_vacation_trips(hoy: date) -> list[dict]:
     """Lee vacation_trips de la DB de la app Vacaciones (DB separada, mismo
     cluster local) y la regresa en el mismo formato {nombre, fecha_inicio,
@@ -84,6 +108,7 @@ def sync() -> dict:
     counts = {"visita": 0, "vacacion": 0}
     fuentes = [
         ("visita", fetch_ical_events(os.environ.get("VISITS_CALENDAR_URL", ""))),
+        ("visita", fetch_home_visits(hoy_date)),
         ("vacacion", fetch_vacation_trips(hoy_date)),
     ]
     for tipo, eventos in fuentes:
