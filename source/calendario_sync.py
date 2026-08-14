@@ -3,7 +3,7 @@ Trae eventos de visitas (calendario personal de iCloud, publicado como ICS)
 y de vacaciones (tabla vacation_trips de la app Vacaciones, DB separada)
 para poder correlacionar partidas con vacaciones fuera de casa o con
 visitas de personas especificas. Liga automaticamente un evento de
-"visita" a un jugador existente en bgstats.jugadores si el nombre
+"visita" a un jugador existente en boardgames_stats.jugadores si el nombre
 coincide (ej. "Paul"). Idempotente (upsert por tipo+nombre+rango de fechas).
 
 Uso:
@@ -75,7 +75,7 @@ def sync() -> dict:
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
 
-    cur.execute("SELECT nombre, uuid FROM bgstats.jugadores WHERE NOT es_anonimo")
+    cur.execute("SELECT nombre, uuid FROM boardgames_stats.jugadores WHERE NOT es_anonimo")
     jugador_por_nombre = {nombre.strip().lower(): uuid for nombre, uuid in cur.fetchall()}
 
     hoy_date = date.today()
@@ -97,7 +97,7 @@ def sync() -> dict:
             jugador_uuid = jugador_por_nombre.get(ev["nombre"].strip().lower()) if tipo == "visita" else None
             cur.execute(
                 """
-                INSERT INTO bgstats.calendario_eventos (tipo, nombre, fecha_inicio, fecha_fin, jugador_uuid)
+                INSERT INTO boardgames_stats.calendario_eventos (tipo, nombre, fecha_inicio, fecha_fin, jugador_uuid)
                 VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (tipo, nombre, fecha_inicio, fecha_fin) DO UPDATE SET
                     jugador_uuid = EXCLUDED.jugador_uuid

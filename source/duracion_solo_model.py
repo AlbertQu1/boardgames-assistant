@@ -1,6 +1,6 @@
 """
 Predice duracion de una partida en MODO SOLITARIO (tag_solo=true en
-bgstats.partidas) usando los mismos datos de BGG que duracion_model.py
+boardgames_stats.partidas) usando los mismos datos de BGG que duracion_model.py
 (peso_complejidad, playtime, rating) mas clima del dia y min/max_jugadores
 del juego (BGG) -- esto ultimo distingue juegos solo puros (min_jugadores=1,
 ej. GROVE) de juegos multijugador adaptados con Automa (min_jugadores>1,
@@ -38,10 +38,10 @@ def cargar_datos(conn) -> list[tuple]:
         """
         SELECT p.duracion_min, d.peso_complejidad, d.min_playtime, d.max_playtime, d.calificacion_promedio,
                c.temp_media_c, j.min_jugadores, j.max_jugadores
-        FROM bgstats.partidas p
-        JOIN bgstats.juegos j ON j.uuid = p.juego_uuid
-        JOIN bgg_data.juegos_detalle d ON d.bgg_id = j.bgg_id
-        LEFT JOIN bgstats.clima_diario c ON c.lugar_uuid = p.lugar_uuid AND c.fecha = p.fecha::date
+        FROM boardgames_stats.partidas p
+        JOIN boardgames_stats.juegos j ON j.uuid = p.juego_uuid
+        JOIN boardgames_bgg.juegos_detalle d ON d.bgg_id = j.bgg_id
+        LEFT JOIN boardgames_stats.clima_diario c ON c.lugar_uuid = p.lugar_uuid AND c.fecha = p.fecha::date
         WHERE p.tag_solo AND p.duracion_min > 0 AND d.peso_complejidad IS NOT NULL
         """
     )

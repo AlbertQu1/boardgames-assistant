@@ -2,11 +2,11 @@
 Puebla el grafo 'red_social' (Apache AGE, extension sobre la misma Postgres
 'casa') con jugadores y relaciones "jugo con" -- separado en dos tipos de
 relacion para no mezclar tu red propia con la de amigos (BGG), mismo
-principio de nunca fusionar bgstats.* con bgg_data.* a nivel de storage:
+principio de nunca fusionar boardgames_stats.* con boardgames_bgg.* a nivel de storage:
 
-- JUEGA_CON_PROPIO: coocurrencia en bgstats.partida_jugadores
-- JUEGA_CON_AMIGOS: coocurrencia en bgg_data.plays_amigos.jugadores,
-  resuelto via bgg_data.jugadores_identificados donde aplica
+- JUEGA_CON_PROPIO: coocurrencia en boardgames_stats.partida_jugadores
+- JUEGA_CON_AMIGOS: coocurrencia en boardgames_bgg.plays_amigos.jugadores,
+  resuelto via boardgames_bgg.jugadores_identificados donde aplica
 
 Se conecta con psycopg2 normal (DATABASE_URL) + LOAD 'age' -- no usa el
 paquete pip "age" (no instalado, y su forma de pasar parametros via
@@ -45,8 +45,8 @@ def construir_edges_propio(cur):
     cur.execute(
         """
         SELECT pj.partida_uuid, j.nombre, j.grupo_social
-        FROM bgstats.partida_jugadores pj
-        JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
+        FROM boardgames_stats.partida_jugadores pj
+        JOIN boardgames_stats.jugadores j ON j.uuid = pj.jugador_uuid
         WHERE j.nombre NOT LIKE '%🤖%'
         """
     )
@@ -67,11 +67,33 @@ def construir_edges_propio(cur):
     return nodos, edges
 
 
+def construir_visitas(cur):
+    """Nodos + relacion VISITO desde calendario_eventos (tipo='visita').
+    A proposito NO se limita a personas que ya tienen Persona por jugar --
+    alguien puede visitar y afectar patrones de consumo (ej. soda) sin
+    necesariamente jugar (o sin que su partida se haya logueado), asi que
+    el nombre crudo del evento entra como Persona nueva si hace falta."""
+    cur.execute(
+        """
+        SELECT COALESCE(j.nombre, ce.nombre) AS nombre, j.grupo_social
+        FROM boardgames_stats.calendario_eventos ce
+        LEFT JOIN boardgames_stats.jugadores j ON j.uuid = ce.jugador_uuid
+        WHERE ce.tipo = 'visita'
+        """
+    )
+    nodos: dict[str, str | None] = {}
+    visitas: dict[str, int] = {}
+    for nombre, grupo in cur.fetchall():
+        nodos.setdefault(nombre, grupo)
+        visitas[nombre] = visitas.get(nombre, 0) + 1
+    return nodos, visitas
+
+
 def construir_edges_amigos(cur):
-    cur.execute("SELECT nombre_variante, persona_real, grupo_social FROM bgg_data.jugadores_identificados")
+    cur.execute("SELECT nombre_variante, persona_real, grupo_social FROM boardgames_bgg.jugadores_identificados")
     identificados = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
 
-    cur.execute("SELECT jugadores FROM bgg_data.plays_amigos WHERE usable_para_analisis")
+    cur.execute("SELECT jugadores FROM boardgames_bgg.plays_amigos WHERE usable_para_analisis")
     nodos: dict[str, str | None] = {}
     edges: dict[tuple[str, str], int] = {}
     for (jugadores,) in cur.fetchall():
@@ -98,9 +120,12 @@ def sync() -> dict:
 
     nodos_propio, edges_propio = construir_edges_propio(cur)
     nodos_amigos, edges_amigos = construir_edges_amigos(cur)
+    nodos_visitas, visitas = construir_visitas(cur)
 
     todos_los_nodos = dict(nodos_propio)
     for n, g in nodos_amigos.items():
+        todos_los_nodos.setdefault(n, g)
+    for n, g in nodos_visitas.items():
         todos_los_nodos.setdefault(n, g)
 
     cur.execute(f"SELECT * FROM cypher('{GRAFO}', $$ MATCH (n) DETACH DELETE n $$) AS (v agtype)")
@@ -137,12 +162,26 @@ def sync() -> dict:
             """
         )
 
+    if visitas:
+        cur.execute(f"SELECT * FROM cypher('{GRAFO}', $$ MERGE (c:Casa) $$) AS (v agtype)")
+    for nombre, peso in visitas.items():
+        cur.execute(
+            f"""
+            SELECT * FROM cypher('{GRAFO}', $$
+                MATCH (p:Persona {{nombre: {cypher_str(nombre)}}}), (c:Casa)
+                MERGE (p)-[r:VISITO]->(c)
+                SET r.peso = {peso}
+            $$) AS (v agtype)
+            """
+        )
+
     cur.close()
     conn.close()
     return {
         "nodos": len(todos_los_nodos),
         "edges_propio": len(edges_propio),
         "edges_amigos": len(edges_amigos),
+        "edges_visitas": len(visitas),
     }
 
 

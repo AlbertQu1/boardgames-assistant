@@ -46,11 +46,11 @@ CATEGORIAS_LUGAR = [
 # grupo_social: tags "Player" que ya existian en BG Stats (Reformers, Cartoneros,
 # GEM, Cul/Cdmx/Gdl por ciudad, etc). Senal aun mas fuerte que categoria_lugar
 # en la validacion (rango 18.7-50.8 min segun grupo vs. 19-47.8 de lugar).
-# Se calcula con JOIN en vivo a bgstats.jugadores.grupo_social, no queda
+# Se calcula con JOIN en vivo a boardgames_stats.jugadores.grupo_social, no queda
 # congelado por partida — si alguien se vuelve anonimo en BG Stats (perfil
 # se fusiona al generico compartido, sin tag), sus partidas historicas
 # pierden la senal salvo que haya una fila en partida_grupo_social_override
-# (ver bgstats.partida_grupo_social_override, poblada a mano caso por caso).
+# (ver boardgames_stats.partida_grupo_social_override, poblada a mano caso por caso).
 CATEGORIAS_GRUPO = [
     "Reformers", "Solo", "Pup", "Cartoneros", "GEM", "Cdmx", "Otros", "Extra", "Cul", "Entreturnos",
     "Cun", "Gdl",  # grupos chicos hoy (13/5 partidas) pero reales, pueden crecer
@@ -82,7 +82,7 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
         """
         SELECT p.duracion_min, d.peso_complejidad, d.dependencia_idioma,
                c.temp_media_c, d.calificacion_promedio,
-               (SELECT count(*) FROM bgstats.partida_jugadores pj WHERE pj.partida_uuid = p.uuid) AS num_jugadores,
+               (SELECT count(*) FROM boardgames_stats.partida_jugadores pj WHERE pj.partida_uuid = p.uuid) AS num_jugadores,
                d.min_playtime, d.max_playtime, p.tag_digital,
                (p.expansiones_usadas IS NOT NULL AND array_length(p.expansiones_usadas, 1) > 0) AS usa_expansion,
                p.tag_solo,
@@ -91,35 +91,35 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
                    gso.grupo_social,
                    (
                        SELECT mode() WITHIN GROUP (ORDER BY jg.grupo_social)
-                       FROM bgstats.partida_jugadores pj2
-                       JOIN bgstats.jugadores jg ON jg.uuid = pj2.jugador_uuid
+                       FROM boardgames_stats.partida_jugadores pj2
+                       JOIN boardgames_stats.jugadores jg ON jg.uuid = pj2.jugador_uuid
                        WHERE pj2.partida_uuid = p.uuid AND jg.grupo_social IS NOT NULL
                    )
                ) AS grupo_social,
                EXTRACT(DOW FROM p.fecha)::int AS dia_semana
-        FROM bgstats.partidas p
-        JOIN bgstats.juegos j ON j.uuid = p.juego_uuid
-        JOIN bgg_data.juegos_detalle d ON d.bgg_id = j.bgg_id
-        LEFT JOIN bgstats.clima_diario c ON c.lugar_uuid = p.lugar_uuid AND c.fecha = p.fecha::date
-        LEFT JOIN bgstats.lugares l ON l.uuid = p.lugar_uuid
-        LEFT JOIN bgstats.partida_grupo_social_override gso ON gso.partida_uuid = p.uuid
+        FROM boardgames_stats.partidas p
+        JOIN boardgames_stats.juegos j ON j.uuid = p.juego_uuid
+        JOIN boardgames_bgg.juegos_detalle d ON d.bgg_id = j.bgg_id
+        LEFT JOIN boardgames_stats.clima_diario c ON c.lugar_uuid = p.lugar_uuid AND c.fecha = p.fecha::date
+        LEFT JOIN boardgames_stats.lugares l ON l.uuid = p.lugar_uuid
+        LEFT JOIN boardgames_stats.partida_grupo_social_override gso ON gso.partida_uuid = p.uuid
         WHERE p.duracion_min > 0 AND d.peso_complejidad IS NOT NULL
         """
     )
     filas = cur.fetchall()
 
     if incluir_amigos:
-        # bgg_data.plays_amigos (partidas de amigos registradas directo en BGG,
-        # NUNCA se fusiona con bgstats.partidas en Postgres — union solo en
+        # boardgames_bgg.plays_amigos (partidas de amigos registradas directo en BGG,
+        # NUNCA se fusiona con boardgames_stats.partidas en Postgres — union solo en
         # memoria, aqui, para entrenar un modelo mas robusto). Clima usa el
-        # lugar exacto cuando existe (bgg_data.clima_ubicacion_diario, lugares
-        # con lat/lon heredado de bgstats.lugares o geocodificado a mano) y
-        # cae al proxy general de CDMX (bgg_data.clima_cdmx_diario) cuando el
+        # lugar exacto cuando existe (boardgames_bgg.clima_ubicacion_diario, lugares
+        # con lat/lon heredado de boardgames_stats.lugares o geocodificado a mano) y
+        # cae al proxy general de CDMX (boardgames_bgg.clima_cdmx_diario) cuando el
         # lugar no esta geolocalizado (ej. casas de amigos sin coords).
-        # grupo_social sale primero de bgg_data.ubicaciones_amigos_alias
+        # grupo_social sale primero de boardgames_bgg.ubicaciones_amigos_alias
         # .grupo_social_lugar (ej. "Global Excel"/"Trabajo" -> GEM, el lugar ya
         # implica el grupo aunque el jugador no matchee) y si no hay eso, de
-        # bgg_data.jugadores_identificados (personas confirmadas a mano como
+        # boardgames_bgg.jugadores_identificados (personas confirmadas a mano como
         # las mismas que ya conoce Alberto, ej. "Pablo"/"Rubens"/"Vinicio" ->
         # Reformers) cruzando cualquier jugador listado; si nada matchea, queda
         # NULL y el entrenamiento rellena con la mediana como dato faltante.
@@ -144,18 +144,18 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
                        (
                            SELECT ji.grupo_social
                            FROM jsonb_array_elements(pa.jugadores) jug
-                           JOIN bgg_data.jugadores_identificados ji
+                           JOIN boardgames_bgg.jugadores_identificados ji
                                ON ji.nombre_variante = LOWER(TRIM(jug->>'nombre'))
                            LIMIT 1
                        )
                    ) AS grupo_social,
                    EXTRACT(DOW FROM pa.fecha)::int AS dia_semana
-            FROM bgg_data.plays_amigos pa
-            JOIN bgg_data.juegos_detalle d ON d.bgg_id = pa.bgg_game_id
-            LEFT JOIN bgg_data.ubicaciones_amigos_alias ua ON ua.ubicacion_raw = pa.ubicacion
-            LEFT JOIN bgg_data.clima_ubicacion_diario cu
+            FROM boardgames_bgg.plays_amigos pa
+            JOIN boardgames_bgg.juegos_detalle d ON d.bgg_id = pa.bgg_game_id
+            LEFT JOIN boardgames_bgg.ubicaciones_amigos_alias ua ON ua.ubicacion_raw = pa.ubicacion
+            LEFT JOIN boardgames_bgg.clima_ubicacion_diario cu
                 ON cu.ubicacion_normalizada = pa.ubicacion_normalizada AND cu.fecha = pa.fecha
-            LEFT JOIN bgg_data.clima_cdmx_diario cc ON cc.fecha = pa.fecha
+            LEFT JOIN boardgames_bgg.clima_cdmx_diario cc ON cc.fecha = pa.fecha
             WHERE pa.usable_para_analisis AND pa.duracion_min > 0 AND d.peso_complejidad IS NOT NULL
             """
         )

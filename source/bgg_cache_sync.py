@@ -1,12 +1,15 @@
 """
 Cachea datos de BoardGameGeek (peso/complejidad, categorias, mecanicas,
 descripcion, playtime, edad minima) para todos los bgg_id distintos en
-bgstats.juegos, usando el endpoint 'thing' del XML API2 con Authorization
-Bearer token (registro obligatorio, ver
+boardgames_stats.juegos + los bgg_game_id que aparecen en boardgames_bgg.plays_amigos (juegos
+que juega el grupo de amigos aunque Alberto nunca los haya jugado el mismo --
+es metadata publica de BGG, no personal, asi que cachearla junta no rompe la
+regla de no fusionar boardgames_stats.* con los datos de amigos), usando el endpoint
+'thing' del XML API2 con Authorization Bearer token (registro obligatorio, ver
 https://boardgamegeek.com/using_the_xml_api).
 
 BGG pide minimizar requests: se piden varios ids por llamada (batch) en vez
-de uno por juego, y el resultado se guarda en Postgres (bgg_data.juegos_detalle)
+de uno por juego, y el resultado se guarda en Postgres (boardgames_bgg.juegos_detalle)
 para no volver a pedirlo — estos datos casi no cambian, no hace falta correr
 esto seguido.
 
@@ -109,12 +112,52 @@ def parse_item(item: ET.Element) -> dict:
     }
 
 
+def guardar_detalle(cur, d: dict) -> None:
+    """Upsert de un juego ya parseado (parse_item) en boardgames_bgg.juegos_detalle.
+    Compartido entre el sync masivo y el lookup on-demand del agente (api.py)."""
+    cur.execute(
+        """
+        INSERT INTO boardgames_bgg.juegos_detalle
+            (bgg_id, descripcion, categorias, mecanicas, peso_complejidad,
+             min_playtime, max_playtime, min_age, imagen_url,
+             numero_jugadores_sugerido, dependencia_idioma,
+             calificacion_promedio, calificacion_bayes, num_calificaciones, sincronizado_en)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, now())
+        ON CONFLICT (bgg_id) DO UPDATE SET
+            descripcion = EXCLUDED.descripcion, categorias = EXCLUDED.categorias,
+            mecanicas = EXCLUDED.mecanicas, peso_complejidad = EXCLUDED.peso_complejidad,
+            min_playtime = EXCLUDED.min_playtime, max_playtime = EXCLUDED.max_playtime,
+            min_age = EXCLUDED.min_age, imagen_url = EXCLUDED.imagen_url,
+            numero_jugadores_sugerido = EXCLUDED.numero_jugadores_sugerido,
+            dependencia_idioma = EXCLUDED.dependencia_idioma,
+            calificacion_promedio = EXCLUDED.calificacion_promedio,
+            calificacion_bayes = EXCLUDED.calificacion_bayes,
+            num_calificaciones = EXCLUDED.num_calificaciones,
+            sincronizado_en = EXCLUDED.sincronizado_en
+        """,
+        (
+            d["bgg_id"], d["descripcion"], d["categorias"], d["mecanicas"],
+            d["peso_complejidad"], d["min_playtime"], d["max_playtime"],
+            d["min_age"], d["imagen_url"],
+            json.dumps(d["numero_jugadores_sugerido"]) if d["numero_jugadores_sugerido"] else None,
+            d["dependencia_idioma"], d["calificacion_promedio"],
+            d["calificacion_bayes"], d["num_calificaciones"],
+        ),
+    )
+
+
 def sync() -> dict:
     token = os.environ["BGG_API_TOKEN"]
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
 
-    cur.execute("SELECT DISTINCT bgg_id FROM bgstats.juegos WHERE bgg_id IS NOT NULL")
+    cur.execute(
+        """
+        SELECT DISTINCT bgg_id FROM boardgames_stats.juegos WHERE bgg_id IS NOT NULL
+        UNION
+        SELECT DISTINCT bgg_game_id FROM boardgames_bgg.plays_amigos WHERE bgg_game_id IS NOT NULL
+        """
+    )
     ids = [r[0] for r in cur.fetchall()]
 
     guardados = 0
@@ -123,35 +166,7 @@ def sync() -> dict:
         root = fetch_batch(lote, token)
         for item in root.findall("item"):
             d = parse_item(item)
-            cur.execute(
-                """
-                INSERT INTO bgg_data.juegos_detalle
-                    (bgg_id, descripcion, categorias, mecanicas, peso_complejidad,
-                     min_playtime, max_playtime, min_age, imagen_url,
-                     numero_jugadores_sugerido, dependencia_idioma,
-                     calificacion_promedio, calificacion_bayes, num_calificaciones, sincronizado_en)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, now())
-                ON CONFLICT (bgg_id) DO UPDATE SET
-                    descripcion = EXCLUDED.descripcion, categorias = EXCLUDED.categorias,
-                    mecanicas = EXCLUDED.mecanicas, peso_complejidad = EXCLUDED.peso_complejidad,
-                    min_playtime = EXCLUDED.min_playtime, max_playtime = EXCLUDED.max_playtime,
-                    min_age = EXCLUDED.min_age, imagen_url = EXCLUDED.imagen_url,
-                    numero_jugadores_sugerido = EXCLUDED.numero_jugadores_sugerido,
-                    dependencia_idioma = EXCLUDED.dependencia_idioma,
-                    calificacion_promedio = EXCLUDED.calificacion_promedio,
-                    calificacion_bayes = EXCLUDED.calificacion_bayes,
-                    num_calificaciones = EXCLUDED.num_calificaciones,
-                    sincronizado_en = EXCLUDED.sincronizado_en
-                """,
-                (
-                    d["bgg_id"], d["descripcion"], d["categorias"], d["mecanicas"],
-                    d["peso_complejidad"], d["min_playtime"], d["max_playtime"],
-                    d["min_age"], d["imagen_url"],
-                    json.dumps(d["numero_jugadores_sugerido"]) if d["numero_jugadores_sugerido"] else None,
-                    d["dependencia_idioma"], d["calificacion_promedio"],
-                    d["calificacion_bayes"], d["num_calificaciones"],
-                ),
-            )
+            guardar_detalle(cur, d)
             guardados += 1
         conn.commit()
         print(f"  lote {i // BATCH_SIZE + 1}: {len(lote)} juegos")

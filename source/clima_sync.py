@@ -26,8 +26,8 @@ def sync_clima() -> dict:
     cur.execute(
         """
         SELECT l.uuid, l.nombre, l.lat, l.lon, min(p.fecha)::date, max(p.fecha)::date
-        FROM bgstats.partidas p
-        JOIN bgstats.lugares l ON l.uuid = p.lugar_uuid
+        FROM boardgames_stats.partidas p
+        JOIN boardgames_stats.lugares l ON l.uuid = p.lugar_uuid
         WHERE l.lat IS NOT NULL
         GROUP BY l.uuid, l.nombre, l.lat, l.lon
         """
@@ -57,7 +57,7 @@ def sync_clima() -> dict:
         for fecha, temp, prec in zip(fechas, temps, precs):
             cur.execute(
                 """
-                INSERT INTO bgstats.clima_diario (lugar_uuid, fecha, temp_media_c, precipitacion_mm)
+                INSERT INTO boardgames_stats.clima_diario (lugar_uuid, fecha, temp_media_c, precipitacion_mm)
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (lugar_uuid, fecha) DO UPDATE SET
                     temp_media_c = EXCLUDED.temp_media_c,

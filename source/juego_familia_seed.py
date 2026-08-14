@@ -1,5 +1,5 @@
 """
-Semilla de bgg_data.juego_familia -- agrupa bgg_ids que son la MISMA partida
+Semilla de boardgames_bgg.juego_familia -- agrupa bgg_ids que son la MISMA partida
 jugable bajo distintas ediciones/reimpresiones (ej. Everdell vs Everdell:
 The Complete Collection), para que al buscar el historial real de un juego
 no se pierdan partidas registradas bajo una edicion hermana.
@@ -15,7 +15,7 @@ Europe + Europa 15th Anniversary, que Alberto confirmo que SI es el mismo).
 Este script es un registro de que se corrio, no re-corre nada automatico
 en cada sync -- la tabla se edita a mano via Postgres directo cuando
 aparece una familia nueva. Como es por bgg_id (no especifica a bgstats),
-tambien cruza con bgg_data.plays_amigos -- de ahi salieron 2 ediciones que
+tambien cruza con boardgames_bgg.plays_amigos -- de ahi salieron 2 ediciones que
 Alberto no tiene el mismo pero sus amigos si juegan (Everdell: Collector's
 Edition, The Castles of Burgundy edicion original bgg_id 84876).
 
@@ -87,7 +87,7 @@ def sync() -> dict:
     cur = conn.cursor()
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS bgg_data.juego_familia (
+        CREATE TABLE IF NOT EXISTS boardgames_bgg.juego_familia (
             bgg_id INTEGER PRIMARY KEY,
             familia TEXT NOT NULL,
             nombre TEXT
@@ -97,7 +97,7 @@ def sync() -> dict:
     for bgg_id, familia, nombre in FAMILIAS:
         cur.execute(
             """
-            INSERT INTO bgg_data.juego_familia (bgg_id, familia, nombre)
+            INSERT INTO boardgames_bgg.juego_familia (bgg_id, familia, nombre)
             VALUES (%s, %s, %s)
             ON CONFLICT (bgg_id) DO UPDATE SET familia = EXCLUDED.familia, nombre = EXCLUDED.nombre
             """,

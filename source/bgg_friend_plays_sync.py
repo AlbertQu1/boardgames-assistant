@@ -1,16 +1,16 @@
 """
 Descarga TODAS las partidas que un amigo registro directo en BGG (no en BG
 Stats) via el endpoint 'plays' del XML API2, y las guarda tal cual en
-bgg_data.plays_amigos -- staging propio, NUNCA se fusiona con bgstats.partidas
+boardgames_bgg.plays_amigos -- staging propio, NUNCA se fusiona con boardgames_stats.partidas
 (decision explicita de Alberto, sesion 2026-08-13). Sirve solo para analizarlo
 por su cuenta.
 
 En cada corrida:
-1. Busca en bgstats.jugadores quien tiene bgg_username registrado (columna que
+1. Busca en boardgames_stats.jugadores quien tiene bgg_username registrado (columna que
    ya llena bgstats_sync.py) -- no hace falta mantener una lista aparte.
 2. Descarga/actualiza sus partidas (upsert por bgg_play_id, idempotente).
-3. Normaliza ubicacion contra bgg_data.ubicaciones_amigos_alias (mismo patron
-   que bgstats.fuentes_compra_alias) -- lo que no matchea queda "Otros" si
+3. Normaliza ubicacion contra boardgames_bgg.ubicaciones_amigos_alias (mismo patron
+   que boardgames_stats.fuentes_compra_alias) -- lo que no matchea queda "Otros" si
    tenia texto, o NULL si no tenia ubicacion capturada del lado de BGG.
 4. Marca es_partida_propia (Alberto aparece como jugador -- variantes de
    nombre conocidas, ver NOMBRES_ALBERTO) y usable_para_analisis (ni
@@ -92,7 +92,7 @@ def fetch_all_plays(username: str, token: str) -> list[dict]:
 
 
 def cargar_alias_ubicaciones(cur) -> dict:
-    cur.execute("SELECT ubicacion_raw, ubicacion_normalizada, categoria_lugar FROM bgg_data.ubicaciones_amigos_alias")
+    cur.execute("SELECT ubicacion_raw, ubicacion_normalizada, categoria_lugar FROM boardgames_bgg.ubicaciones_amigos_alias")
     return {raw: (norm, cat) for raw, norm, cat in cur.fetchall()}
 
 
@@ -144,7 +144,7 @@ def sync(username: str) -> dict:
         usable = (not p["incompleta"]) and (not propia)
         cur.execute(
             """
-            INSERT INTO bgg_data.plays_amigos
+            INSERT INTO boardgames_bgg.plays_amigos
                 (bgg_play_id, bgg_username, fecha, juego, bgg_game_id, ubicacion,
                  comentarios, duracion_min, cantidad, incompleta, jugadores, datos_extra,
                  ubicacion_normalizada, categoria_lugar, es_partida_propia, usable_para_analisis,
@@ -177,14 +177,14 @@ def sync(username: str) -> dict:
 
 
 def sync_todos_los_amigos() -> dict:
-    """Busca en bgstats.jugadores quien tiene bgg_username y sincroniza a
+    """Busca en boardgames_stats.jugadores quien tiene bgg_username y sincroniza a
     todos -- se usa en cada corrida de bgstats_sync.py para detectar amigos
     nuevos sin mantener una lista aparte."""
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT DISTINCT bgg_username FROM bgstats.jugadores
+        SELECT DISTINCT bgg_username FROM boardgames_stats.jugadores
         WHERE bgg_username IS NOT NULL AND TRIM(bgg_username) != '' AND nombre != %s
         """,
         (MI_NOMBRE,),  # excluye el propio usuario, esta tabla es solo de amigos
@@ -208,7 +208,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     grupo = parser.add_mutually_exclusive_group(required=True)
     grupo.add_argument("--username", help="Usuario de BGG de un amigo especifico")
-    grupo.add_argument("--todos", action="store_true", help="Todos los amigos con bgg_username en bgstats.jugadores")
+    grupo.add_argument("--todos", action="store_true", help="Todos los amigos con bgg_username en boardgames_stats.jugadores")
     args = parser.parse_args()
 
     if args.todos:

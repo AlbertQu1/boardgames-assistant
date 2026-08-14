@@ -1,5 +1,5 @@
 """
-Fase 2: sincroniza un export de BG Stats (JSON) hacia bgstats.* en Postgres.
+Fase 2: sincroniza un export de BG Stats (JSON) hacia boardgames_stats.* en Postgres.
 Idempotente: se puede correr con el mismo archivo varias veces sin duplicar
 (upsert por uuid en juegos/jugadores/lugares/partidas/colecciones;
 partida_jugadores se borra y reinserta por partida en cada corrida).
@@ -10,8 +10,8 @@ que BG Stats agregue en el futuro y que todavia no tiene columna propia.
 
 `acquired_from` es texto libre (typos, mayusculas distintas, variantes del
 mismo lugar) escrito en BG Stats. En cada corrida se normaliza contra
-bgstats.fuentes_compra_alias (variantes conocidas -> nombre canonico,
-opcionalmente ligado a un bgstats.lugares existente) y, si no hay alias
+boardgames_stats.fuentes_compra_alias (variantes conocidas -> nombre canonico,
+opcionalmente ligado a un boardgames_stats.lugares existente) y, si no hay alias
 pero el texto coincide con un lugar ya trackeado, se liga automaticamente.
 Agregar una fila nueva a fuentes_compra_alias es suficiente para que la
 proxima corrida junte una variante nueva sin tocar este script.
@@ -87,7 +87,7 @@ def parse_metadata(raw: str | None) -> dict:
 
 
 # claves de metaData de una copia que ya se guardan en columnas tipadas de
-# bgstats.colecciones; el resto se guarda tal cual en metadata_extra
+# boardgames_stats.colecciones; el resto se guarda tal cual en metadata_extra
 COPIA_CAMPOS_TIPADOS = {
     "AcquiredFrom", "AcquisitionDate", "InventoryLocation", "InventoryDate",
     "PricePaid", "PricePaidCurrency", "CurrentPrice", "CurrentPriceCurrency",
@@ -119,23 +119,23 @@ def tiene_tag(play: dict, tag_id) -> bool:
 
 
 def cargar_alias_compra(cur) -> dict:
-    cur.execute("SELECT alias, fuente_canonica, lugar_uuid FROM bgstats.fuentes_compra_alias")
+    cur.execute("SELECT alias, fuente_canonica, lugar_uuid FROM boardgames_stats.fuentes_compra_alias")
     return {alias: (canonica, lugar_uuid) for alias, canonica, lugar_uuid in cur.fetchall()}
 
 
 def cargar_categoria_compra(cur) -> dict:
     """Clasificacion manual de cada fuente_compra canonica (en_linea/amigos/regalo/
     viaje/tienda_fisica), para poder agrupar el gasto por tipo de compra."""
-    cur.execute("SELECT fuente_canonica, categoria FROM bgstats.fuentes_compra_categoria")
+    cur.execute("SELECT fuente_canonica, categoria FROM boardgames_stats.fuentes_compra_categoria")
     return dict(cur.fetchall())
 
 
 def cargar_moneda_override(cur) -> dict:
     """Copias donde price_paid_currency del export es ambiguo (ej. "otro") y se
-    confirmo manualmente cual era la moneda real. Ver bgstats.colecciones_moneda_override.
+    confirmo manualmente cual era la moneda real. Ver boardgames_stats.colecciones_moneda_override.
     Las claves se normalizan a minusculas: BG Stats exporta uuids en mayusculas
     pero psycopg2 los regresa como uuid.UUID (str() en minusculas)."""
-    cur.execute("SELECT copia_uuid, moneda_real FROM bgstats.colecciones_moneda_override")
+    cur.execute("SELECT copia_uuid, moneda_real FROM boardgames_stats.colecciones_moneda_override")
     return {str(copia_uuid).lower(): moneda for copia_uuid, moneda in cur.fetchall()}
 
 
@@ -206,7 +206,7 @@ def sync(path: str) -> dict:
         es_propio = any(copy.get("statusOwned") == 1 for copy in g.get("copies", []))
         cur.execute(
             """
-            INSERT INTO bgstats.juegos
+            INSERT INTO boardgames_stats.juegos
                 (uuid, bg_stats_id, nombre, bgg_id, bgg_nombre, bgg_year, es_expansion, es_base,
                  designers, min_jugadores, max_jugadores, min_duracion_min, max_duracion_min,
                  cooperativo, rating, veces_jugado_previo, modification_date, es_propio, datos_extra)
@@ -235,13 +235,13 @@ def sync(path: str) -> dict:
     alias_compra = cargar_alias_compra(cur)
     moneda_override = cargar_moneda_override(cur)
     categoria_compra_por_fuente = cargar_categoria_compra(cur)
-    cur.execute("SELECT nombre, uuid FROM bgstats.lugares")
+    cur.execute("SELECT nombre, uuid FROM boardgames_stats.lugares")
     lugares_por_nombre = {nombre.strip().lower(): uuid for nombre, uuid in cur.fetchall()}
     fx_cache: dict = {}
     fuentes_sin_normalizar = set()
 
     cur.execute(
-        "DELETE FROM bgstats.colecciones WHERE juego_uuid = ANY(%s::uuid[])",
+        "DELETE FROM boardgames_stats.colecciones WHERE juego_uuid = ANY(%s::uuid[])",
         (list(juego_id_a_uuid.values()),),
     )
     for g in data["games"]:
@@ -272,7 +272,7 @@ def sync(path: str) -> dict:
 
             cur.execute(
                 """
-                INSERT INTO bgstats.colecciones
+                INSERT INTO boardgames_stats.colecciones
                     (uuid, juego_uuid, version_name, year, status_owned, status_prev_owned,
                      status_for_trade, status_want_in_trade, status_want_to_buy, status_want_to_play,
                      status_wishlist, status_preordered, acquired_from, acquisition_date,
@@ -320,9 +320,9 @@ def sync(path: str) -> dict:
     # override manual de nombre por jugador/lugar (ej. nombres corregidos a mano en Postgres
     # que BG Stats no tiene bien capturados) — sin esto, cada sync pisaria la correccion con
     # el nombre crudo del export
-    cur.execute("SELECT jugador_uuid, nombre_real FROM bgstats.jugadores_nombre_override")
+    cur.execute("SELECT jugador_uuid, nombre_real FROM boardgames_stats.jugadores_nombre_override")
     nombre_override_jugadores = {str(uuid).lower(): nombre for uuid, nombre in cur.fetchall()}
-    cur.execute("SELECT lugar_uuid, nombre_real FROM bgstats.lugares_nombre_override")
+    cur.execute("SELECT lugar_uuid, nombre_real FROM boardgames_stats.lugares_nombre_override")
     nombre_override_lugares = {str(uuid).lower(): nombre for uuid, nombre in cur.fetchall()}
 
     # jugadores — BG Stats permite etiquetar jugadores con tags tipo "Player"
@@ -339,7 +339,7 @@ def sync(path: str) -> dict:
         grupo_social = tags_p[0] if tags_p else None
         cur.execute(
             """
-            INSERT INTO bgstats.jugadores (uuid, bg_stats_id, nombre, es_anonimo, bgg_username,
+            INSERT INTO boardgames_stats.jugadores (uuid, bg_stats_id, nombre, es_anonimo, bgg_username,
                                             modification_date, datos_extra, grupo_social)
             VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s)
             ON CONFLICT (uuid) DO UPDATE SET
@@ -361,9 +361,9 @@ def sync(path: str) -> dict:
     # marca "revisado" desde el badge de la app una vez que Alberto lo ve.
     cur.execute(
         """
-        INSERT INTO bgg_data.amigos_nuevos_pendientes (bgg_username, jugador_nombre, jugador_uuid)
+        INSERT INTO boardgames_bgg.amigos_nuevos_pendientes (bgg_username, jugador_nombre, jugador_uuid)
         SELECT DISTINCT ON (j.bgg_username) j.bgg_username, j.nombre, j.uuid
-        FROM bgstats.jugadores j
+        FROM boardgames_stats.jugadores j
         WHERE j.bgg_username IS NOT NULL AND TRIM(j.bgg_username) != '' AND j.nombre != %s
         ON CONFLICT (bgg_username) DO NOTHING
         RETURNING bgg_username
@@ -387,7 +387,7 @@ def sync(path: str) -> dict:
         ] or None
         cur.execute(
             """
-            INSERT INTO bgstats.lugares (uuid, bg_stats_id, nombre, modification_date, datos_extra, tags_ubicacion)
+            INSERT INTO boardgames_stats.lugares (uuid, bg_stats_id, nombre, modification_date, datos_extra, tags_ubicacion)
             VALUES (%s, %s, %s, %s, %s::jsonb, %s)
             ON CONFLICT (uuid) DO UPDATE SET
                 nombre = EXCLUDED.nombre, modification_date = EXCLUDED.modification_date,
@@ -399,8 +399,8 @@ def sync(path: str) -> dict:
     # alerta en la app: fuente de compra sin normalizar (no matcheo ningun alias
     # ni lugar existente, ver normalizar_fuente_compra) o lugar de partida nuevo
     # (nombre que no existia antes de este sync) -- ambos necesitan revision manual
-    # (agregar alias en bgstats.fuentes_compra_alias, o categoria_lugar en
-    # bgstats.lugares). Mismo patron que bgg_data.amigos_nuevos_pendientes: se
+    # (agregar alias en boardgames_stats.fuentes_compra_alias, o categoria_lugar en
+    # boardgames_stats.lugares). Mismo patron que boardgames_bgg.amigos_nuevos_pendientes: se
     # inserta una vez, se limpia desde el badge de la app, no se re-alerta si
     # ya se reviso aunque el sync lo siga trayendo sin normalizar.
     for tipo, valor in [("compra", f) for f in fuentes_sin_normalizar] + [
@@ -408,7 +408,7 @@ def sync(path: str) -> dict:
     ]:
         cur.execute(
             """
-            INSERT INTO bgstats.lugares_pendientes_revision (tipo, valor)
+            INSERT INTO boardgames_stats.lugares_pendientes_revision (tipo, valor)
             VALUES (%s, %s)
             ON CONFLICT (tipo, valor) DO NOTHING
             """,
@@ -419,7 +419,7 @@ def sync(path: str) -> dict:
     # override manual de lugar por partida (ej. partidas etiquetadas "Vacaciones" en BG Stats
     # que en realidad fueron en un lugar especifico segun el comentario) — sin esto, cada sync
     # pisaria la reasignacion con el locationRefId generico del export crudo
-    cur.execute("SELECT partida_uuid, lugar_uuid FROM bgstats.partida_lugar_override")
+    cur.execute("SELECT partida_uuid, lugar_uuid FROM boardgames_stats.partida_lugar_override")
     lugar_override = {str(partida_uuid).lower(): lugar_uuid for partida_uuid, lugar_uuid in cur.fetchall()}
     tag_ids = resolver_tag_ids(data)
 
@@ -435,7 +435,7 @@ def sync(path: str) -> dict:
         )
         cur.execute(
             """
-            INSERT INTO bgstats.partidas
+            INSERT INTO boardgames_stats.partidas
                 (uuid, juego_uuid, lugar_uuid, fecha, duracion_min, comentarios, usa_equipos,
                  expansiones_usadas, modification_date, datos_extra, tag_solo, tag_digital)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s::uuid[], %s, %s::jsonb, %s, %s)
@@ -454,11 +454,11 @@ def sync(path: str) -> dict:
             ),
         )
 
-        cur.execute("DELETE FROM bgstats.partida_jugadores WHERE partida_uuid = %s", (play["uuid"],))
+        cur.execute("DELETE FROM boardgames_stats.partida_jugadores WHERE partida_uuid = %s", (play["uuid"],))
         for ps in play.get("playerScores", []):
             cur.execute(
                 """
-                INSERT INTO bgstats.partida_jugadores
+                INSERT INTO boardgames_stats.partida_jugadores
                     (partida_uuid, jugador_uuid, nombre_anonimo, puntaje, posicion, gano, orden_asiento)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
@@ -472,24 +472,24 @@ def sync(path: str) -> dict:
     conn.commit()
 
     # deteccion automatica de partidas con el jugador anonimo generico que
-    # necesitan grupo_social (ver bgstats.partida_grupo_social_override,
+    # necesitan grupo_social (ver boardgames_stats.partida_grupo_social_override,
     # sesion 2026-08-13): si todos los jugadores nombrados en la partida
     # coinciden en 1 solo grupo, se resuelve solo; si no hay ninguno nombrado
-    # pero el lugar tiene grupo_social_lugar (bgstats.lugares), tambien; lo
+    # pero el lugar tiene grupo_social_lugar (boardgames_stats.lugares), tambien; lo
     # demas (mixto o sin señal) se manda al badge de la app para resolver a mano.
     anonimos_pendientes_nuevos = 0
-    cur.execute("SELECT uuid FROM bgstats.jugadores WHERE es_anonimo = true LIMIT 1")
+    cur.execute("SELECT uuid FROM boardgames_stats.jugadores WHERE es_anonimo = true LIMIT 1")
     fila_anon = cur.fetchone()
     if fila_anon:
         uuid_anon = fila_anon[0]
         cur.execute(
             """
             SELECT DISTINCT p.uuid
-            FROM bgstats.partida_jugadores pj
-            JOIN bgstats.partidas p ON p.uuid = pj.partida_uuid
+            FROM boardgames_stats.partida_jugadores pj
+            JOIN boardgames_stats.partidas p ON p.uuid = pj.partida_uuid
             WHERE pj.jugador_uuid = %s
-              AND NOT EXISTS (SELECT 1 FROM bgstats.partida_grupo_social_override o WHERE o.partida_uuid = p.uuid)
-              AND NOT EXISTS (SELECT 1 FROM bgstats.anonimos_pendientes_agrupar a WHERE a.partida_uuid = p.uuid)
+              AND NOT EXISTS (SELECT 1 FROM boardgames_stats.partida_grupo_social_override o WHERE o.partida_uuid = p.uuid)
+              AND NOT EXISTS (SELECT 1 FROM boardgames_stats.anonimos_pendientes_agrupar a WHERE a.partida_uuid = p.uuid)
             """,
             (uuid_anon,),
         )
@@ -497,8 +497,8 @@ def sync(path: str) -> dict:
             cur.execute(
                 """
                 SELECT DISTINCT j.grupo_social
-                FROM bgstats.partida_jugadores pj
-                JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
+                FROM boardgames_stats.partida_jugadores pj
+                JOIN boardgames_stats.jugadores j ON j.uuid = pj.jugador_uuid
                 WHERE pj.partida_uuid = %s AND j.grupo_social IS NOT NULL
                 """,
                 (partida_uuid,),
@@ -506,39 +506,39 @@ def sync(path: str) -> dict:
             grupos = [r[0] for r in cur.fetchall()]
             if len(grupos) == 1:
                 cur.execute(
-                    "INSERT INTO bgstats.partida_grupo_social_override (partida_uuid, grupo_social) VALUES (%s, %s)",
+                    "INSERT INTO boardgames_stats.partida_grupo_social_override (partida_uuid, grupo_social) VALUES (%s, %s)",
                     (partida_uuid, grupos[0]),
                 )
                 continue
             if len(grupos) == 0:
                 cur.execute(
                     """
-                    SELECT l.grupo_social_lugar FROM bgstats.partidas p
-                    LEFT JOIN bgstats.lugares l ON l.uuid = p.lugar_uuid WHERE p.uuid = %s
+                    SELECT l.grupo_social_lugar FROM boardgames_stats.partidas p
+                    LEFT JOIN boardgames_stats.lugares l ON l.uuid = p.lugar_uuid WHERE p.uuid = %s
                     """,
                     (partida_uuid,),
                 )
                 grupo_lugar = cur.fetchone()[0]
                 if grupo_lugar:
                     cur.execute(
-                        "INSERT INTO bgstats.partida_grupo_social_override (partida_uuid, grupo_social) VALUES (%s, %s)",
+                        "INSERT INTO boardgames_stats.partida_grupo_social_override (partida_uuid, grupo_social) VALUES (%s, %s)",
                         (partida_uuid, grupo_lugar),
                     )
                     continue
                 cur.execute(
-                    "INSERT INTO bgstats.anonimos_pendientes_agrupar (partida_uuid, tipo) VALUES (%s, 'sin_senal')",
+                    "INSERT INTO boardgames_stats.anonimos_pendientes_agrupar (partida_uuid, tipo) VALUES (%s, 'sin_senal')",
                     (partida_uuid,),
                 )
                 anonimos_pendientes_nuevos += 1
             else:
                 cur.execute(
-                    "INSERT INTO bgstats.anonimos_pendientes_agrupar (partida_uuid, tipo) VALUES (%s, 'mixto')",
+                    "INSERT INTO boardgames_stats.anonimos_pendientes_agrupar (partida_uuid, tipo) VALUES (%s, 'mixto')",
                     (partida_uuid,),
                 )
                 anonimos_pendientes_nuevos += 1
         conn.commit()
 
-    cur.execute("SELECT COUNT(*) FROM bgstats.colecciones")
+    cur.execute("SELECT COUNT(*) FROM boardgames_stats.colecciones")
     n_colecciones = cur.fetchone()[0]
     counts = {
         "juegos": len(data["games"]),
@@ -566,7 +566,7 @@ if __name__ == "__main__":
     if counts["fuentes_compra_sin_normalizar"]:
         print(
             "Fuentes de compra sin alias ni lugar (se guardaron tal cual, "
-            "agrega una fila a bgstats.fuentes_compra_alias si son variantes de algo existente):"
+            "agrega una fila a boardgames_stats.fuentes_compra_alias si son variantes de algo existente):"
         )
         for f in counts["fuentes_compra_sin_normalizar"]:
             print(f"  - {f}")

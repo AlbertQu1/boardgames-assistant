@@ -13,6 +13,7 @@ import mimetypes
 import os
 import re
 import shutil
+import xml.etree.ElementTree as ET
 
 import requests
 
@@ -53,7 +54,12 @@ from source.query_test import search
 from source.bgstats_sync import limpiar_nombre_prefijo, sync as bgstats_sync
 from source.calendario_sync import sync as calendario_sync
 from source.pdf_pipeline import index_pdf
-from source.bgg_cache_sync import sync as bgg_cache_sync
+from source.bgg_cache_sync import (
+    sync as bgg_cache_sync,
+    fetch_batch as bgg_fetch_batch,
+    parse_item as bgg_parse_item,
+    guardar_detalle as bgg_guardar_detalle,
+)
 from source.bgg_friend_plays_sync import sync_todos_los_amigos
 from source.grafo_social_sync import sync as grafo_social_sync
 from source.duracion_model import entrenar as entrenar_duracion, predecir as predecir_duracion
@@ -93,14 +99,14 @@ TOOLS = types.Tool(
                 "de juegos de mesa. Usar para preguntas sobre NUMERO DE JUGADORES, DURACION, cuantas veces "
                 "se jugo algo, con quien, donde, cuando, puntajes, etc. NO usar para preguntas de reglas.\n\n"
                 "Tablas disponibles (schema bgstats):\n"
-                "- bgstats.juegos(uuid, nombre, bgg_id, bgg_nombre, bgg_year, es_expansion, es_base, "
+                "- boardgames_stats.juegos(uuid, nombre, bgg_id, bgg_nombre, bgg_year, es_expansion, es_base, "
                 "designers, min_jugadores, max_jugadores, min_duracion_min, max_duracion_min, cooperativo, "
                 "rating, veces_jugado_previo, es_propio — si lo tiene en su coleccion actualmente)\n"
-                "- bgstats.colecciones(uuid, juego_uuid, version_name, status_owned, status_prev_owned, "
+                "- boardgames_stats.colecciones(uuid, juego_uuid, version_name, status_owned, status_prev_owned, "
                 "status_for_trade, status_want_to_buy, status_want_to_play, status_wishlist, "
                 "fuente_compra — nombre YA normalizado de donde/de quien lo consiguio (usar este, no "
                 "acquired_from que es el texto crudo con variantes de escritura), "
-                "lugar_compra_uuid — FK a bgstats.lugares si la fuente es un lugar fisico ya trackeado, "
+                "lugar_compra_uuid — FK a boardgames_stats.lugares si la fuente es un lugar fisico ya trackeado, "
                 "categoria_compra — clasificacion manual: 'en_linea', 'tienda_fisica', 'amigos', 'regalo', "
                 "'viaje' (NULL si no hay acquired_from registrado), usar para agrupar gasto por tipo de "
                 "compra, "
@@ -111,23 +117,23 @@ TOOLS = types.Tool(
                 "rating, quantity) — una fila por copia fisica de un juego; usar para preguntas de cuanto "
                 "ha gastado (SUM(price_paid_mxn)), en donde suele comprar (GROUP BY fuente_compra), que "
                 "tiene en wishlist, que ya no tiene (status_owned=false AND status_prev_owned=true)\n"
-                "- bgstats.jugadores(uuid, nombre, es_anonimo, bgg_username, grupo_social — circulo "
+                "- boardgames_stats.jugadores(uuid, nombre, es_anonimo, bgg_username, grupo_social — circulo "
                 "social/ciudad del jugador ej. 'Reformers', 'GEM', 'Cdmx', 'Cul', 'Cartoneros', 'Pup', "
                 "'Entreturnos', 'Ex' (gente con la que ya no hay contacto, no recomendar invitarla), "
                 "'Evento' (conocidos en convenciones), puede ser NULL)\n"
-                "- bgstats.lugares(uuid, nombre, lat, lon, direccion_referencia) — lat/lon puede ser NULL, "
+                "- boardgames_stats.lugares(uuid, nombre, lat, lon, direccion_referencia) — lat/lon puede ser NULL, "
                 "no todos los lugares tienen coordenadas todavia\n"
-                "- bgstats.partidas(uuid, juego_uuid, lugar_uuid, fecha, duracion_min, comentarios, "
+                "- boardgames_stats.partidas(uuid, juego_uuid, lugar_uuid, fecha, duracion_min, comentarios, "
                 "usa_equipos, expansiones_usadas)\n"
-                "- bgstats.partida_jugadores(partida_uuid, jugador_uuid, nombre_anonimo, puntaje, "
+                "- boardgames_stats.partida_jugadores(partida_uuid, jugador_uuid, nombre_anonimo, puntaje, "
                 "posicion, gano, orden_asiento)\n"
-                "- bgstats.partida_grupo_social_override(partida_uuid, grupo_social) — cuando un jugador "
+                "- boardgames_stats.partida_grupo_social_override(partida_uuid, grupo_social) — cuando un jugador "
                 "se anonimiza en BG Stats pierde su grupo_social; esta tabla lo preserva por partida. "
                 "Para el grupo_social real de una partida siempre usar COALESCE(override.grupo_social, "
                 "jugadores.grupo_social) via LEFT JOIN a esta tabla por partida_uuid, no solo jugadores\n"
-                "- bgstats.clima_diario(lugar_uuid, fecha, temp_media_c, precipitacion_mm) — clima "
+                "- boardgames_stats.clima_diario(lugar_uuid, fecha, temp_media_c, precipitacion_mm) — clima "
                 "historico por lugar+dia, unir con partidas via lugar_uuid y fecha::date = fecha\n"
-                "- bgstats.calendario_eventos(tipo — 'visita' o 'vacacion', nombre, fecha_inicio, fecha_fin, "
+                "- boardgames_stats.calendario_eventos(tipo — 'visita' o 'vacacion', nombre, fecha_inicio, fecha_fin, "
                 "jugador_uuid — FK a jugadores si el nombre de la visita coincide con un jugador registrado) "
                 "— fecha_fin es EXCLUSIVA (formato ICS), el ultimo dia real es fecha_fin - 1 dia. Usar para "
                 "preguntas de cuanto se juega cuando alguien visita, o que se jugo en vacaciones: unir con "
@@ -135,29 +141,29 @@ TOOLS = types.Tool(
                 "Nota: 'Ticket to Ride' (el base) tiene es_expansion=true por un dato asi de BGG, "
                 "no asumir que es_expansion=false significa 'juego base jugable'.\n\n"
                 "Tablas de amigos (schema bgg_data) — partidas que amigos de Alberto registraron directo "
-                "en BGG, NUNCA se fusionan con bgstats.partidas, se combinan solo con JOIN/UNION en la "
+                "en BGG, NUNCA se fusionan con boardgames_stats.partidas, se combinan solo con JOIN/UNION en la "
                 "consulta misma:\n"
-                "- bgg_data.juegos_detalle(bgg_id, categorias — array texto tipo BGG ej. 'Medical', "
+                "- boardgames_bgg.juegos_detalle(bgg_id, categorias — array texto tipo BGG ej. 'Medical', "
                 "'Economic', mecanicas — array texto ej. 'Worker Placement', 'Rondel', peso_complejidad "
                 "— 1 a 5, calificacion_promedio, min_playtime, max_playtime) — cache de metadata BGG para "
-                "TODOS los juegos, propios y de amigos; unir bgstats.juegos.bgg_id o "
-                "bgg_data.plays_amigos.bgg_game_id contra esta tabla para complejidad/categorias/mecanicas\n"
-                "- bgg_data.plays_amigos(bgg_play_id, bgg_username, fecha, juego, bgg_game_id, ubicacion, "
+                "TODOS los juegos, propios y de amigos; unir boardgames_stats.juegos.bgg_id o "
+                "boardgames_bgg.plays_amigos.bgg_game_id contra esta tabla para complejidad/categorias/mecanicas\n"
+                "- boardgames_bgg.plays_amigos(bgg_play_id, bgg_username, fecha, juego, bgg_game_id, ubicacion, "
                 "ubicacion_normalizada, categoria_lugar, duracion_min, jugadores — jsonb array de objetos "
                 "{nombre, username}, usable_para_analisis — SIEMPRE filtrar WHERE usable_para_analisis) "
                 "— usar jsonb_array_elements(jugadores) para expandir jugadores por partida\n"
-                "- bgg_data.jugadores_identificados(nombre_variante — en minusculas/trim, persona_real, "
+                "- boardgames_bgg.jugadores_identificados(nombre_variante — en minusculas/trim, persona_real, "
                 "grupo_social) — cruza nombres crudos de jugadores de plays_amigos con personas reales que "
                 "Alberto conoce; unir jsonb_array_elements(jugadores)->>'nombre' con LOWER(TRIM(...)) = "
                 "nombre_variante\n"
-                "- bgg_data.ubicaciones_amigos_alias(ubicacion_raw, ubicacion_normalizada, categoria_lugar, "
+                "- boardgames_bgg.ubicaciones_amigos_alias(ubicacion_raw, ubicacion_normalizada, categoria_lugar, "
                 "grupo_social_lugar, lat, lon) — grupo_social_lugar tiene prioridad sobre "
                 "jugadores_identificados cuando ambos aplican (ej. jugar en 'Global Excel' siempre implica "
                 "grupo GEM aunque el jugador no matchee)\n"
-                "- bgg_data.juego_familia(bgg_id, familia, nombre) — agrupa ediciones/reimpresiones que son "
+                "- boardgames_bgg.juego_familia(bgg_id, familia, nombre) — agrupa ediciones/reimpresiones que son "
                 "la MISMA experiencia de juego (ej. Everdell y Everdell: The Complete Collection son bgg_id "
                 "distintos pero 'familia'='Everdell'). Usar SIEMPRE que pregunten por el historial/duracion "
-                "real de un juego especifico: unir bgstats.juegos.bgg_id o bgg_data.plays_amigos.bgg_game_id "
+                "real de un juego especifico: unir boardgames_stats.juegos.bgg_id o boardgames_bgg.plays_amigos.bgg_game_id "
                 "contra esta tabla por bgg_id, agrupar por familia, y sumar/promediar sobre TODOS los bgg_id "
                 "de esa familia en vez de solo el bgg_id exacto — si no se hace esto se pierden partidas "
                 "registradas bajo una edicion hermana. Ojo: no todas las variantes de una marca son la misma "
@@ -178,15 +184,44 @@ TOOLS = types.Tool(
                 required=["sql"],
             ),
         ),
+        types.FunctionDeclaration(
+            name="bgg_lookup",
+            description=(
+                "Busca un juego EN VIVO en BoardGameGeek (categorias, mecanicas, complejidad, "
+                "descripcion, calificacion) cuando NO aparece en la biblioteca local "
+                "(query_sql regreso vacio en boardgames_stats.juegos / boardgames_bgg.plays_amigos) "
+                "y tampoco tiene reglamento indexado (search_rulebooks regreso vacio). "
+                "Ultimo recurso -- usar para poder responder algo en vez de rendirse cuando nadie "
+                "en la biblioteca local tiene el juego."
+            ),
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "nombre": types.Schema(type="STRING", description="Nombre del juego a buscar en BGG"),
+                },
+                required=["nombre"],
+            ),
+        ),
     ]
 )
 
 SYSTEM_PROMPT = (
-    "Eres un asistente de juegos de mesa con dos herramientas: search_rulebooks (reglas, busca en "
-    "texto de reglamentos) y query_sql (estadisticas de partidas, consulta SQL de solo lectura). "
+    "Eres un asistente de juegos de mesa con tres herramientas: search_rulebooks (reglas, busca en "
+    "texto de reglamentos), query_sql (estadisticas de partidas y biblioteca, consulta SQL de solo "
+    "lectura) y bgg_lookup (busca un juego en vivo en BoardGameGeek). "
     "Elige la herramienta correcta segun el tipo de pregunta — nunca inventes SQL sobre reglas ni "
     "busques reglas para preguntas de estadisticas. Basa tu respuesta unicamente en lo que las "
-    "herramientas regresen. Si no encuentras la respuesta, dilo claramente en vez de inventar. "
+    "herramientas regresen. "
+    "Para preguntas tipo 'le gustaria X a mi grupo' o 'deberia jugar X': primero intenta encontrar "
+    "categorias/mecanicas/complejidad de X con query_sql (boardgames_bgg.juegos_detalle, incluso via "
+    "boardgames_bgg.plays_amigos si X es un juego que solo tus amigos han jugado en BGG); si eso regresa "
+    "vacio, usa bgg_lookup como ultimo recurso. IMPORTANTE — se decisivo: en cuanto tengas la metadata "
+    "del juego (categorias/mecanicas/peso) Y algo de contexto de que juega el grupo social relevante "
+    "(aunque sea agregado/parcial, no una coincidencia perfecta), ESO YA ES SUFICIENTE para dar una "
+    "opinion fundamentada — responde con eso, no sigas iterando buscando una confirmacion mas exacta. "
+    "El costo de una respuesta razonada con datos parciales es mucho menor que agotar tus intentos sin "
+    "responder nada. Si de verdad no encuentras nada relevante en 1-2 intentos, dilo claramente en vez "
+    "de seguir buscando o de inventar. "
     "Cada chunk de search_rulebooks trae un doc_type: 'reglamento' (reglas normales), 'errata' "
     "(correccion oficial — si contradice al reglamento normal, la errata tiene prioridad), 'faq', "
     "o 'automa' (reglas del modo solitario contra un bot/IA). Si la pregunta es sobre juego normal "
@@ -200,6 +235,57 @@ SYSTEM_PROMPT = (
     "los chunks doc_type=reglamento como base y los doc_type=automa para las diferencias. "
     "Responde en español, de forma directa y concisa."
 )
+
+
+BGG_SEARCH_URL = "https://boardgamegeek.com/xmlapi2/search"
+
+
+def bgg_buscar_por_nombre(nombre: str) -> str:
+    """Ultimo recurso del agente cuando un juego no esta en la biblioteca
+    local ni tiene reglamento indexado: busca en vivo en BGG (search +
+    thing) y cachea el resultado en boardgames_bgg.juegos_detalle con el
+    mismo upsert que bgg_cache_sync.py, para no volver a pedirlo despues."""
+    token = os.environ["BGG_API_TOKEN"]
+    try:
+        resp = requests.get(
+            BGG_SEARCH_URL,
+            params={"query": nombre, "type": "boardgame"},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+    except Exception as e:
+        return f"Error buscando '{nombre}' en BGG: {e}"
+
+    items = root.findall("item")
+    if not items:
+        return f"No se encontro '{nombre}' en BoardGameGeek."
+
+    bgg_id = int(items[0].get("id"))
+    nombre_el = items[0].find("name")
+    nombre_bgg = nombre_el.get("value") if nombre_el is not None else nombre
+
+    try:
+        detalle_root = bgg_fetch_batch([bgg_id], token)
+        item = detalle_root.find("item")
+        if item is None:
+            return f"BGG no regreso detalle para '{nombre_bgg}' (bgg_id={bgg_id})."
+        d = bgg_parse_item(item)
+    except Exception as e:
+        return f"Error obteniendo detalle de BGG para '{nombre_bgg}': {e}"
+
+    try:
+        conn = psycopg2.connect(os.environ["DATABASE_URL"])
+        cur = conn.cursor()
+        bgg_guardar_detalle(cur, d)
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass  # cachear es best-effort, no debe tumbar la respuesta al usuario
+
+    return json.dumps({"nombre": nombre_bgg, **d}, default=str, ensure_ascii=False)
 
 
 def execute_sql(sql: str) -> str:
@@ -261,7 +347,7 @@ def juegos_catalogo():
     que el mismo juego termine indexado bajo nombres ligeramente distintos."""
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
-    cur.execute("SELECT nombre FROM bgstats.juegos ORDER BY nombre;")
+    cur.execute("SELECT nombre FROM boardgames_stats.juegos ORDER BY nombre;")
     result = [row[0] for row in cur.fetchall()]
     cur.close()
     conn.close()
@@ -275,8 +361,8 @@ def juegos_faltantes():
     cur.execute(
         f"""
         SELECT j.nombre, j.es_propio, COUNT(p.uuid) AS partidas, MAX(p.fecha) AS ultima_partida
-        FROM bgstats.juegos j
-        LEFT JOIN bgstats.partidas p ON p.juego_uuid = j.uuid
+        FROM boardgames_stats.juegos j
+        LEFT JOIN boardgames_stats.partidas p ON p.juego_uuid = j.uuid
         WHERE NOT EXISTS (
             SELECT 1 FROM {params.DB_SCHEMA}.{params.CHUNKS_TABLE} rc
             WHERE rc.juego = j.nombre OR rc.juego_base = j.nombre
@@ -308,7 +394,7 @@ def bgg_lookup(url: str):
 
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
-    cur.execute("SELECT nombre FROM bgstats.juegos WHERE bgg_id = %s LIMIT 1;", (bgg_id,))
+    cur.execute("SELECT nombre FROM boardgames_stats.juegos WHERE bgg_id = %s LIMIT 1;", (bgg_id,))
     row = cur.fetchone()
     cur.close()
     conn.close()
@@ -428,7 +514,7 @@ FILTRO_NO_BOT = "COALESCE(pj.nombre_anonimo, j.nombre) NOT LIKE '%%🤖%%'"
 @app.get("/bgstats/companeros")
 def bgstats_companeros(modo: str = "jugadores"):
     """modo=jugadores (default): solo companeros ligados a un jugador real
-    (jugador_uuid, con perfil en bgstats.jugadores) — excluye nombres sueltos
+    (jugador_uuid, con perfil en boardgames_stats.jugadores) — excluye nombres sueltos
     de texto libre por partida (nombre_anonimo, ej. "Frank Munoz", "Jairo"),
     el cajon generico "Jugador anonimo", y a los oponentes automa/bot (esos
     salen en /bgstats/top-juegos?modo=solo, agrupados por juego).
@@ -441,8 +527,8 @@ def bgstats_companeros(modo: str = "jugadores"):
         f"""
         SELECT COALESCE(pj.nombre_anonimo, j.nombre) AS nombre, pj.partida_uuid,
                pj.gano
-        FROM bgstats.partida_jugadores pj
-        LEFT JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
+        FROM boardgames_stats.partida_jugadores pj
+        LEFT JOIN boardgames_stats.jugadores j ON j.uuid = pj.jugador_uuid
         WHERE COALESCE(pj.nombre_anonimo, j.nombre) IS NOT NULL
           AND COALESCE(pj.nombre_anonimo, j.nombre) != %s
           AND (%s OR (pj.nombre_anonimo IS NULL AND j.nombre != %s AND {FILTRO_NO_BOT}))
@@ -475,11 +561,11 @@ def bgstats_resumen():
         """
         SELECT COUNT(*), COUNT(DISTINCT juego_uuid),
                ROUND(SUM(duracion_min) / 60.0, 1), MIN(fecha), MAX(fecha)
-        FROM bgstats.partidas
+        FROM boardgames_stats.partidas
         """
     )
     partidas, juegos_distintos, horas_totales, primera, ultima = cur.fetchone()
-    cur.execute("SELECT COUNT(*) FROM bgstats.juegos WHERE es_propio")
+    cur.execute("SELECT COUNT(*) FROM boardgames_stats.juegos WHERE es_propio")
     juegos_propios = cur.fetchone()[0]
     cur.close()
     conn.close()
@@ -515,17 +601,17 @@ def bgstats_top_juegos(limite: int = 15, modo: str = "todos"):
         cur.execute(
             f"""
             WITH conteo_jugadores AS (
-                SELECT partida_uuid, COUNT(*) AS n FROM bgstats.partida_jugadores GROUP BY partida_uuid
+                SELECT partida_uuid, COUNT(*) AS n FROM boardgames_stats.partida_jugadores GROUP BY partida_uuid
             ),
             partida_tiene_bot AS (
                 SELECT DISTINCT pj.partida_uuid
-                FROM bgstats.partida_jugadores pj
-                LEFT JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
+                FROM boardgames_stats.partida_jugadores pj
+                LEFT JOIN boardgames_stats.jugadores j ON j.uuid = pj.jugador_uuid
                 WHERE {FILTRO_NO_BOT.replace('NOT LIKE', 'LIKE')}
             ),
             partidas_solo AS (
                 SELECT p.uuid, p.juego_uuid, p.duracion_min, p.tag_digital
-                FROM bgstats.partidas p
+                FROM boardgames_stats.partidas p
                 LEFT JOIN conteo_jugadores cj ON cj.partida_uuid = p.uuid
                 WHERE p.tag_solo
                    OR p.uuid IN (SELECT partida_uuid FROM partida_tiene_bot)
@@ -534,7 +620,7 @@ def bgstats_top_juegos(limite: int = 15, modo: str = "todos"):
             SELECT g.nombre, COUNT(*) AS partidas, ROUND(SUM(ps.duracion_min) / 60.0, 1) AS horas,
                    BOOL_OR(ps.tag_digital) AS digital
             FROM partidas_solo ps
-            JOIN bgstats.juegos g ON g.uuid = ps.juego_uuid
+            JOIN boardgames_stats.juegos g ON g.uuid = ps.juego_uuid
             GROUP BY g.nombre
             ORDER BY partidas DESC
             LIMIT %s
@@ -547,10 +633,10 @@ def bgstats_top_juegos(limite: int = 15, modo: str = "todos"):
         cur.execute(
             f"""
             SELECT g.nombre, ARRAY_AGG(DISTINCT COALESCE(pj.nombre_anonimo, j.nombre) ORDER BY COALESCE(pj.nombre_anonimo, j.nombre))
-            FROM bgstats.partidas p
-            JOIN bgstats.juegos g ON g.uuid = p.juego_uuid
-            JOIN bgstats.partida_jugadores pj ON pj.partida_uuid = p.uuid
-            LEFT JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
+            FROM boardgames_stats.partidas p
+            JOIN boardgames_stats.juegos g ON g.uuid = p.juego_uuid
+            JOIN boardgames_stats.partida_jugadores pj ON pj.partida_uuid = p.uuid
+            LEFT JOIN boardgames_stats.jugadores j ON j.uuid = pj.jugador_uuid
             WHERE {FILTRO_NO_BOT.replace('NOT LIKE', 'LIKE')}
             GROUP BY g.nombre
             """
@@ -572,7 +658,7 @@ def bgstats_top_juegos(limite: int = 15, modo: str = "todos"):
         """
         SELECT j.nombre, COUNT(*) AS partidas, ROUND(SUM(p.duracion_min) / 60.0, 1) AS horas,
                BOOL_OR(p.tag_digital) AS digital
-        FROM bgstats.partidas p JOIN bgstats.juegos j ON j.uuid = p.juego_uuid
+        FROM boardgames_stats.partidas p JOIN boardgames_stats.juegos j ON j.uuid = p.juego_uuid
         GROUP BY j.nombre
         ORDER BY partidas DESC
         LIMIT %s
@@ -598,7 +684,7 @@ def bgstats_cuando_juegas():
     cur.execute(
         """
         SELECT EXTRACT(DOW FROM fecha)::int AS dow, COUNT(*)
-        FROM bgstats.partidas GROUP BY dow ORDER BY dow
+        FROM boardgames_stats.partidas GROUP BY dow ORDER BY dow
         """
     )
     conteo_por_dia = dict(cur.fetchall())
@@ -606,12 +692,12 @@ def bgstats_cuando_juegas():
     # probabilidad de jugar por dia de la semana (dias distintos con partida /
     # dias totales de ese tipo en el rango de fechas) -- separado de conteo de
     # partidas porque un dia con 5 partidas no es "mas probable" que uno con 1,
-    # y comparado contra la red de amigos (bgg_data.plays_amigos) para ver si
+    # y comparado contra la red de amigos (boardgames_bgg.plays_amigos) para ver si
     # el circulo social en general tiene un patron distinto al propio (sesion
     # 2026-08-13, union solo en memoria aqui, nunca en Postgres)
-    cur.execute("SELECT DISTINCT fecha::date FROM bgstats.partidas")
+    cur.execute("SELECT DISTINCT fecha::date FROM boardgames_stats.partidas")
     fechas_propias = set(r[0] for r in cur.fetchall())
-    cur.execute("SELECT DISTINCT fecha FROM bgg_data.plays_amigos WHERE usable_para_analisis")
+    cur.execute("SELECT DISTINCT fecha FROM boardgames_bgg.plays_amigos WHERE usable_para_analisis")
     fechas_amigos = set(r[0] for r in cur.fetchall())
 
     todas_las_fechas = fechas_propias | fechas_amigos
@@ -648,7 +734,7 @@ def bgstats_cuando_juegas():
     cur.execute(
         """
         SELECT to_char(fecha, 'YYYY-MM') AS mes, COUNT(*)
-        FROM bgstats.partidas
+        FROM boardgames_stats.partidas
         WHERE fecha >= (CURRENT_DATE - INTERVAL '12 months')
         GROUP BY mes ORDER BY mes
         """
@@ -673,9 +759,9 @@ def bgstats_clima():
                 ELSE 'calido'
             END AS rango_temp,
             COUNT(*)
-        FROM bgstats.partidas p
-        JOIN bgstats.lugares l ON l.uuid = p.lugar_uuid
-        JOIN bgstats.clima_diario c ON c.lugar_uuid = l.uuid AND c.fecha = p.fecha::date
+        FROM boardgames_stats.partidas p
+        JOIN boardgames_stats.lugares l ON l.uuid = p.lugar_uuid
+        JOIN boardgames_stats.clima_diario c ON c.lugar_uuid = l.uuid AND c.fecha = p.fecha::date
         GROUP BY condicion, rango_temp
         """
     )
@@ -704,7 +790,7 @@ def bgstats_top_lugares(limite: int = 15):
     cur.execute(
         """
         SELECT l.nombre, COUNT(*) AS partidas, l.lat, l.lon
-        FROM bgstats.partidas p JOIN bgstats.lugares l ON l.uuid = p.lugar_uuid
+        FROM boardgames_stats.partidas p JOIN boardgames_stats.lugares l ON l.uuid = p.lugar_uuid
         GROUP BY l.nombre, l.lat, l.lon
         ORDER BY partidas DESC
         LIMIT %s
@@ -729,10 +815,10 @@ def bgstats_propios_sin_jugar():
     cur.execute(
         """
         SELECT nombre, min_jugadores, max_jugadores, min_duracion_min, max_duracion_min, rating
-        FROM bgstats.juegos j
+        FROM boardgames_stats.juegos j
         WHERE es_propio AND NOT es_expansion
-          AND NOT EXISTS (SELECT 1 FROM bgstats.partidas p WHERE p.juego_uuid = j.uuid)
-          AND NOT EXISTS (SELECT 1 FROM bgstats.partidas p WHERE j.uuid = ANY(p.expansiones_usadas))
+          AND NOT EXISTS (SELECT 1 FROM boardgames_stats.partidas p WHERE p.juego_uuid = j.uuid)
+          AND NOT EXISTS (SELECT 1 FROM boardgames_stats.partidas p WHERE j.uuid = ANY(p.expansiones_usadas))
         ORDER BY nombre
         """
     )
@@ -759,8 +845,8 @@ def bgstats_coleccion():
                COUNT(*) FILTER (WHERE c.status_owned AND NOT j.es_expansion),
                COUNT(*) FILTER (WHERE c.status_prev_owned AND NOT c.status_owned AND NOT j.es_expansion),
                COUNT(*) FILTER (WHERE c.status_wishlist)
-        FROM bgstats.colecciones c
-        JOIN bgstats.juegos j ON j.uuid = c.juego_uuid
+        FROM boardgames_stats.colecciones c
+        JOIN boardgames_stats.juegos j ON j.uuid = c.juego_uuid
         """
     )
     gasto_total, copias_propias, copias_ya_no_tiene, en_wishlist = cur.fetchone()
@@ -769,11 +855,11 @@ def bgstats_coleccion():
         """
         SELECT COUNT(*) FILTER (WHERE es_propio AND NOT es_expansion),
                COUNT(*) FILTER (WHERE es_propio AND NOT es_expansion AND NOT EXISTS (
-                   SELECT 1 FROM bgstats.partidas p WHERE p.juego_uuid = j.uuid
+                   SELECT 1 FROM boardgames_stats.partidas p WHERE p.juego_uuid = j.uuid
                ) AND NOT EXISTS (
-                   SELECT 1 FROM bgstats.partidas p WHERE j.uuid = ANY(p.expansiones_usadas)
+                   SELECT 1 FROM boardgames_stats.partidas p WHERE j.uuid = ANY(p.expansiones_usadas)
                ))
-        FROM bgstats.juegos j
+        FROM boardgames_stats.juegos j
         """
     )
     juegos_propios_total, juegos_propios_sin_jugar = cur.fetchone()
@@ -781,7 +867,7 @@ def bgstats_coleccion():
     cur.execute(
         """
         SELECT COALESCE(categoria_compra, 'sin_categoria'), ROUND(SUM(price_paid_mxn)::numeric, 2), COUNT(*)
-        FROM bgstats.colecciones
+        FROM boardgames_stats.colecciones
         WHERE status_owned AND categoria_compra IS DISTINCT FROM 'regalo'
         GROUP BY COALESCE(categoria_compra, 'sin_categoria')
         ORDER BY 2 DESC NULLS LAST
@@ -794,7 +880,7 @@ def bgstats_coleccion():
     cur.execute(
         """
         SELECT fuente_compra, ROUND(SUM(price_paid_mxn)::numeric, 2), COUNT(*)
-        FROM bgstats.colecciones
+        FROM boardgames_stats.colecciones
         WHERE fuente_compra IS NOT NULL AND status_owned AND categoria_compra IS DISTINCT FROM 'regalo'
         GROUP BY fuente_compra
         ORDER BY 2 DESC NULLS LAST
@@ -827,8 +913,8 @@ def bgstats_duracion_juegos():
     cur.execute(
         """
         SELECT j.nombre, j.min_jugadores, j.max_jugadores
-        FROM bgstats.juegos j
-        JOIN bgg_data.juegos_detalle d ON d.bgg_id = j.bgg_id
+        FROM boardgames_stats.juegos j
+        JOIN boardgames_bgg.juegos_detalle d ON d.bgg_id = j.bgg_id
         WHERE d.peso_complejidad IS NOT NULL AND NOT j.es_expansion
         ORDER BY j.nombre
         """
@@ -843,8 +929,8 @@ def bgstats_duracion_juegos():
 def bgstats_duracion_entrenamiento(incluir_amigos: bool = False):
     """Diagnostico del modelo de duracion: MAE de cada candidato, MAE del
     baseline (promedio simple) para comparar, y coeficientes activos.
-    incluir_amigos=False (default): se probo sumar partidas de bgg_data.plays_amigos
-    (union solo en memoria, esa tabla nunca se fusiona con bgstats.partidas) y no
+    incluir_amigos=False (default): se probo sumar partidas de boardgames_bgg.plays_amigos
+    (union solo en memoria, esa tabla nunca se fusiona con boardgames_stats.partidas) y no
     mejoro el modelo (MAE 16.28 sin amigos vs 16.58 con amigos, sesion 2026-08-13,
     muestra chica: ~37 de 1589 filas). Se deja el parametro por si crece la muestra."""
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
@@ -862,8 +948,11 @@ def bgstats_duracion_entrenamiento(incluir_amigos: bool = False):
 
 
 # mismas coords de "Casa" reusadas en todo el proyecto (coffee, clima_sync.py,
-# bgg_friend_clima_sync.py) -- la mayoria de las partidas propias son ahi
-CASA_LAT, CASA_LON = 19.4326, -99.1332
+# bgg_friend_clima_sync.py) -- la mayoria de las partidas propias son ahi.
+# Corregidas 2026-08-13: el valor anterior (19.4326, -99.1332, probablemente
+# un placeholder/aproximacion inicial) estaba a ~1.9km de la ubicacion real
+# confirmada por Alberto via Plus Code (76F2CRPX+VJ).
+CASA_LAT, CASA_LON = 19.4371875, -99.1509375
 
 
 def obtener_temperatura_actual() -> float | None:
@@ -898,8 +987,8 @@ def bgstats_duracion_predecir(
     cur.execute(
         """
         SELECT d.peso_complejidad, d.dependencia_idioma, d.min_playtime, d.max_playtime, d.calificacion_promedio
-        FROM bgstats.juegos j
-        JOIN bgg_data.juegos_detalle d ON d.bgg_id = j.bgg_id
+        FROM boardgames_stats.juegos j
+        JOIN boardgames_bgg.juegos_detalle d ON d.bgg_id = j.bgg_id
         WHERE j.nombre = %s
         LIMIT 1
         """,
@@ -971,8 +1060,8 @@ def bgstats_duracion_solo_predecir(juego: str):
         """
         SELECT d.peso_complejidad, d.min_playtime, d.max_playtime, d.calificacion_promedio,
                j.min_jugadores, j.max_jugadores
-        FROM bgstats.juegos j
-        JOIN bgg_data.juegos_detalle d ON d.bgg_id = j.bgg_id
+        FROM boardgames_stats.juegos j
+        JOIN boardgames_bgg.juegos_detalle d ON d.bgg_id = j.bgg_id
         WHERE j.nombre = %s
         LIMIT 1
         """,
@@ -1011,7 +1100,7 @@ def bgstats_duracion_solo_predecir(juego: str):
 @app.get("/bgstats/amigos/pendientes")
 def bgstats_amigos_pendientes():
     """Amigos con bgg_username detectado en el ultimo sync de BG Stats que
-    aun no se han revisado (ver bgg_data.amigos_nuevos_pendientes, poblada por
+    aun no se han revisado (ver boardgames_bgg.amigos_nuevos_pendientes, poblada por
     bgstats_sync.py en cada corrida). El frontend los muestra como alerta y
     limpia la bandera via /bgstats/amigos/pendientes/{bgg_username}/revisar."""
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
@@ -1019,7 +1108,7 @@ def bgstats_amigos_pendientes():
     cur.execute(
         """
         SELECT bgg_username, jugador_nombre, detectado_en
-        FROM bgg_data.amigos_nuevos_pendientes
+        FROM boardgames_bgg.amigos_nuevos_pendientes
         WHERE NOT revisado
         ORDER BY detectado_en
         """
@@ -1038,7 +1127,7 @@ def bgstats_amigo_revisar(bgg_username: str):
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
     cur.execute(
-        "UPDATE bgg_data.amigos_nuevos_pendientes SET revisado = TRUE, revisado_en = now() WHERE bgg_username = %s",
+        "UPDATE boardgames_bgg.amigos_nuevos_pendientes SET revisado = TRUE, revisado_en = now() WHERE bgg_username = %s",
         (bgg_username,),
     )
     conn.commit()
@@ -1053,7 +1142,7 @@ def bgstats_amigo_revisar(bgg_username: str):
 @app.get("/bgstats/lugares/pendientes")
 def bgstats_lugares_pendientes():
     """Fuentes de compra sin alias o lugares de partida nuevos detectados en
-    el ultimo sync (ver bgstats.lugares_pendientes_revision, poblada por
+    el ultimo sync (ver boardgames_stats.lugares_pendientes_revision, poblada por
     bgstats_sync.py). tipo es 'compra' o 'lugar_partida'. El frontend los
     muestra como alerta y limpia la bandera via /bgstats/lugares/pendientes/revisar."""
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
@@ -1061,7 +1150,7 @@ def bgstats_lugares_pendientes():
     cur.execute(
         """
         SELECT tipo, valor, detectado_en
-        FROM bgstats.lugares_pendientes_revision
+        FROM boardgames_stats.lugares_pendientes_revision
         WHERE NOT revisado
         ORDER BY detectado_en
         """
@@ -1081,7 +1170,7 @@ def bgstats_lugar_revisar(tipo: str, valor: str):
     cur = conn.cursor()
     cur.execute(
         """
-        UPDATE bgstats.lugares_pendientes_revision SET revisado = TRUE, revisado_en = now()
+        UPDATE boardgames_stats.lugares_pendientes_revision SET revisado = TRUE, revisado_en = now()
         WHERE tipo = %s AND valor = %s
         """,
         (tipo, valor),
@@ -1100,7 +1189,7 @@ def bgstats_anonimos_pendientes():
     """Partidas con el jugador anonimo generico donde no se pudo inferir
     grupo_social solo (mixto: 2+ grupos entre los nombrados: sin_senal:
     nadie nombrado tiene grupo ni el lugar tiene grupo_social_lugar). Ver
-    bgstats.anonimos_pendientes_agrupar, poblada por bgstats_sync.py. El
+    boardgames_stats.anonimos_pendientes_agrupar, poblada por bgstats_sync.py. El
     frontend deja elegir el grupo y llama a
     /bgstats/anonimos/pendientes/revisar para resolverlo."""
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
@@ -1110,14 +1199,14 @@ def bgstats_anonimos_pendientes():
         SELECT a.partida_uuid, a.tipo, p.fecha, jg.nombre, l.nombre,
                (
                    SELECT string_agg(j.nombre || ' (' || j.grupo_social || ')', ', ')
-                   FROM bgstats.partida_jugadores pj
-                   JOIN bgstats.jugadores j ON j.uuid = pj.jugador_uuid
+                   FROM boardgames_stats.partida_jugadores pj
+                   JOIN boardgames_stats.jugadores j ON j.uuid = pj.jugador_uuid
                    WHERE pj.partida_uuid = a.partida_uuid AND j.grupo_social IS NOT NULL
                ) AS jugadores_con_grupo
-        FROM bgstats.anonimos_pendientes_agrupar a
-        JOIN bgstats.partidas p ON p.uuid = a.partida_uuid
-        JOIN bgstats.juegos jg ON jg.uuid = p.juego_uuid
-        LEFT JOIN bgstats.lugares l ON l.uuid = p.lugar_uuid
+        FROM boardgames_stats.anonimos_pendientes_agrupar a
+        JOIN boardgames_stats.partidas p ON p.uuid = a.partida_uuid
+        JOIN boardgames_stats.juegos jg ON jg.uuid = p.juego_uuid
+        LEFT JOIN boardgames_stats.lugares l ON l.uuid = p.lugar_uuid
         WHERE NOT a.revisado
         ORDER BY a.detectado_en
         """
@@ -1140,7 +1229,7 @@ def bgstats_anonimo_revisar(partida_uuid: str, grupo_social: str):
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO bgstats.partida_grupo_social_override (partida_uuid, grupo_social)
+        INSERT INTO boardgames_stats.partida_grupo_social_override (partida_uuid, grupo_social)
         VALUES (%s, %s)
         ON CONFLICT (partida_uuid) DO UPDATE SET grupo_social = EXCLUDED.grupo_social
         """,
@@ -1148,7 +1237,7 @@ def bgstats_anonimo_revisar(partida_uuid: str, grupo_social: str):
     )
     cur.execute(
         """
-        UPDATE bgstats.anonimos_pendientes_agrupar SET revisado = TRUE, revisado_en = now()
+        UPDATE boardgames_stats.anonimos_pendientes_agrupar SET revisado = TRUE, revisado_en = now()
         WHERE partida_uuid = %s
         """,
         (partida_uuid,),
@@ -1266,6 +1355,8 @@ def ask(req: AskRequest):
                 )
             elif fc.name == "query_sql":
                 contenido = execute_sql(fc.args["sql"])
+            elif fc.name == "bgg_lookup":
+                contenido = bgg_buscar_por_nombre(fc.args["nombre"])
             else:
                 contenido = f"Herramienta desconocida: {fc.name}"
 
