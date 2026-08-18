@@ -13,6 +13,7 @@ import mimetypes
 import os
 import re
 import shutil
+import time
 import xml.etree.ElementTree as ET
 
 import requests
@@ -185,6 +186,37 @@ TOOLS = types.Tool(
             ),
         ),
         types.FunctionDeclaration(
+            name="query_graph",
+            description=(
+                "Ejecuta una consulta Cypher de solo lectura (MATCH/RETURN) sobre el grafo social "
+                "'red_social' (Apache AGE, compartido con otros proyectos de Alberto). Usar para "
+                "preguntas de ESTRUCTURA/RELACIONES entre personas — con quien juega mas, que tan "
+                "conectados estan dos grupos sociales, quien conecta a dos circulos distintos, red de "
+                "companeros de alguien. NO usar para 'que juegos le gustan a X grupo' (usar query_sql) "
+                "ni para stats de partidas/duracion/puntajes (tambien query_sql) — el grafo NO sabe que "
+                "juegos se jugaron, solo quien esta conectado con quien.\n\n"
+                "Nodos y relaciones disponibles:\n"
+                "- (:Persona {nombre, grupo_social, cumpleanos}) — mismo catalogo de personas usado en "
+                "boardgames_stats.jugadores y personal_wiki.personas (nombres ya resueltos/canonicos).\n"
+                "- (:Persona)-[:JUEGA_CON_PROPIO|:JUEGA_CON_AMIGOS]-(:Persona) — coocurrencia en partidas "
+                "de juegos de mesa (propias o registradas por amigos en BGG).\n"
+                "- (:Casa) y (:Persona)-[:VISITO]->(:Casa) — visitas registradas.\n"
+                "- (:Evento) y (:Persona)-[:ASISTIO]->(:Evento) — eventos del diario personal de Alberto "
+                "(fiestas, conciertos), no especifico de juegos de mesa pero puede dar contexto social.\n"
+                "IMPORTANTE: el RETURN debe ser una sola expresion (un mapa), no varias columnas "
+                "separadas por coma — envolver los campos en {}. Ejemplo para '¿con quien juega mas "
+                "Eddy?': MATCH (:Persona {nombre: 'Eddy'})-[r:JUEGA_CON_PROPIO]-(p:Persona) RETURN "
+                "{persona: p.nombre, veces: r.peso} ORDER BY r.peso DESC LIMIT 5."
+            ),
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "cypher": types.Schema(type="STRING", description="Consulta Cypher MATCH/RETURN a ejecutar"),
+                },
+                required=["cypher"],
+            ),
+        ),
+        types.FunctionDeclaration(
             name="bgg_lookup",
             description=(
                 "Busca un juego EN VIVO en BoardGameGeek (categorias, mecanicas, complejidad, "
@@ -206,12 +238,23 @@ TOOLS = types.Tool(
 )
 
 SYSTEM_PROMPT = (
-    "Eres un asistente de juegos de mesa con tres herramientas: search_rulebooks (reglas, busca en "
+    "Eres un asistente de juegos de mesa con cuatro herramientas: search_rulebooks (reglas, busca en "
     "texto de reglamentos), query_sql (estadisticas de partidas y biblioteca, consulta SQL de solo "
-    "lectura) y bgg_lookup (busca un juego en vivo en BoardGameGeek). "
+    "lectura), query_graph (relaciones/estructura social — con quien juega mas alguien, que tan "
+    "conectados estan dos personas o grupos) y bgg_lookup (busca un juego en vivo en BoardGameGeek). "
     "Elige la herramienta correcta segun el tipo de pregunta — nunca inventes SQL sobre reglas ni "
-    "busques reglas para preguntas de estadisticas. Basa tu respuesta unicamente en lo que las "
+    "busques reglas para preguntas de estadisticas. Para preguntas de 'que tipo de juegos jugamos con "
+    "[grupo social]' usa query_sql (jugadores.grupo_social + partidas), NO query_graph — el grafo solo "
+    "sabe quien esta conectado con quien, no que se jugo. Basa tu respuesta unicamente en lo que las "
     "herramientas regresen. "
+    "DIAGRAMAS — cuando la pregunta sea sobre relaciones/estructura social (con quien juega mas "
+    "alguien, companeros frecuentes de un grupo, red de conexiones) y query_graph o query_sql hayan "
+    "devuelto datos relacionales, incluye ADEMAS de tu respuesta en texto un diagrama en formato "
+    "Mermaid dentro de un bloque de codigo ```mermaid, generado por ti a partir de esos datos (Alberto "
+    "nunca escribe el codigo Mermaid, tu decides el contenido). Usa 'graph TD' con nodos de persona/"
+    "grupo y aristas etiquetadas con el conteo de partidas o veces jugado juntos. No generes diagrama "
+    "si la pregunta es sobre un solo hecho puntual (reglas, una sola estadistica) o no hay suficientes "
+    "datos relacionales para que valga la pena. "
     "Para preguntas tipo 'le gustaria X a mi grupo' o 'deberia jugar X': primero intenta encontrar "
     "categorias/mecanicas/complejidad de X con query_sql (boardgames_bgg.juegos_detalle, incluso via "
     "boardgames_bgg.plays_amigos si X es un juego que solo tus amigos han jugado en BGG); si eso regresa "
@@ -233,7 +276,17 @@ SYSTEM_PROMPT = (
     "cero — explica primero que se juega igual que el modo normal, y despues detalla SOLO las "
     "diferencias/reglas especiales del Automa (como se comporta, que espacios ocupa, etc), usando "
     "los chunks doc_type=reglamento como base y los doc_type=automa para las diferencias. "
-    "Responde en español, de forma directa y concisa."
+    "Responde en español, de forma directa y concisa. "
+    "TRANSPARENCIA DE FUENTE — MUY IMPORTANTE: nunca respondas preguntas de reglas usando tu "
+    "conocimiento general/de entrenamiento como respaldo silencioso. Si search_rulebooks regresa "
+    "SIN RESULTADOS para el juego preguntado, dilo explicitamente al usuario ('no tengo el "
+    "reglamento de [juego] indexado, no puedo responder con precision') en vez de completar la "
+    "respuesta con lo que sepas de memoria — las reglas varian por edicion/idioma y una respuesta "
+    "generica puede ser incorrecta. Al final de cada respuesta sustantiva, indica brevemente de "
+    "donde salio la informacion: 'Fuente: reglamento indexado de [juego]' / 'Fuente: estadisticas "
+    "de tu biblioteca' / 'Fuente: busqueda en vivo en BoardGameGeek'. Si de verdad respondes sin "
+    "ninguna herramienta (ej. pregunta general que no requiere datos), dilo tambien: 'Fuente: "
+    "conocimiento general del modelo, sin reglamento indexado — verifica con el reglamento oficial'."
 )
 
 
@@ -305,9 +358,35 @@ def execute_sql(sql: str) -> str:
     return json.dumps([dict(zip(columnas, fila)) for fila in filas], default=str, ensure_ascii=False)
 
 
+def execute_cypher(cypher_query: str) -> str:
+    stripped = cypher_query.strip().rstrip(";")
+    peligrosas = ("MERGE", "CREATE", "DELETE", "SET ", "REMOVE", "DETACH")
+    if any(kw in stripped.upper() for kw in peligrosas):
+        return "Error: solo se permiten consultas de lectura (MATCH/RETURN), no modificaciones."
+    try:
+        conn = psycopg2.connect(os.environ["DATABASE_URL_READONLY"])
+        cur = conn.cursor()
+        cur.execute('SET search_path = ag_catalog, "$user", public')
+        cur.execute(f"SELECT * FROM cypher('red_social', $$ {stripped} $$) AS (resultado agtype) LIMIT 50")
+        filas = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        return f"Error en la consulta: {e}"
+    if not filas:
+        return "SIN RESULTADOS: la consulta no encontro datos en el grafo. NO respondas usando tu conocimiento general."
+    return json.dumps([str(f[0]) for f in filas], default=str, ensure_ascii=False)
+
+
+class HistorialTurno(BaseModel):
+    pregunta: str
+    respuesta: str
+
+
 class AskRequest(BaseModel):
     pregunta: str
     juego: str | None = None
+    historial: list[HistorialTurno] | None = None
 
 
 class Fuente(BaseModel):
@@ -380,28 +459,174 @@ def juegos_faltantes():
     return result
 
 
-BGG_ID_RE = re.compile(r"boardgamegeek\.com/boardgame(?:expansion)?/(\d+)")
-
 PDFS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), params.PDFS_DIR)
 
 
-@app.get("/juegos/bgg-lookup")
-def bgg_lookup(url: str):
-    match = BGG_ID_RE.search(url)
-    if not match:
-        raise HTTPException(status_code=400, detail="No se reconoce un ID de juego en ese link de BGG.")
-    bgg_id = int(match.group(1))
+BGG_BUSQUEDA_TIPOS = "boardgame,boardgameexpansion"
+BGG_BATCH_DETALLE = 20  # tope de ids por llamada a thing (mismo BATCH_SIZE que bgg_cache_sync)
+BGG_BUSQUEDA_CACHE_TTL = 600  # 10 min: BGG pide minimizar requests y el autocompletado dispara muchos
+_bgg_busqueda_cache: dict[str, tuple[float, list[dict]]] = {}
 
+
+def _int_o_none(valor) -> int | None:
+    try:
+        return int(valor)
+    except (TypeError, ValueError):
+        return None
+
+
+def bgg_buscar_items(termino: str) -> list[dict]:
+    """search + un solo thing en batch por los ids que regreso. El search da
+    el match por nombre pero no dice cual es el nombre primario (si pegaste
+    con un nombre alterno regresa ese) ni trae imagen/popularidad; el thing
+    resuelve las tres cosas en una llamada."""
+    token = os.environ["BGG_API_TOKEN"]
+    resp = requests.get(
+        BGG_SEARCH_URL,
+        params={"query": termino, "type": BGG_BUSQUEDA_TIPOS},
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    root = ET.fromstring(resp.content)
+
+    orden: list[int] = []
+    base: dict[int, dict] = {}
+    for item in root.findall("item"):
+        try:
+            bgg_id = int(item.get("id"))
+        except (TypeError, ValueError):
+            continue
+        if bgg_id in base:
+            continue
+        nombre_el = item.find("name[@type='primary']")
+        if nombre_el is None:
+            nombre_el = item.find("name")
+        anio_el = item.find("yearpublished")
+        orden.append(bgg_id)
+        base[bgg_id] = {
+            "bgg_id": bgg_id,
+            "nombre_bgg": nombre_el.get("value") if nombre_el is not None else termino,
+            "anio": _int_o_none(anio_el.get("value") if anio_el is not None else None),
+            "es_expansion": item.get("type") == "boardgameexpansion",
+            "thumbnail": None,
+            "num_calificaciones": None,
+        }
+
+    # BGG regresa el search sin ordenar por relevancia (para "carcassonne" salen
+    # primero fan-expansions de 5 votos y el juego base ni aparece en los primeros).
+    # Se pre-ordena por parecido del nombre antes de recortar, porque el thing en
+    # batch — que es el que trae la popularidad para el orden final — no puede
+    # pedir los cientos de ids que a veces regresa el search.
+    t = termino.lower()
+    posicion = {bgg_id: i for i, bgg_id in enumerate(orden)}
+
+    def parecido(bgg_id: int) -> tuple:
+        nombre = base[bgg_id]["nombre_bgg"].lower()
+        return (nombre != t, not nombre.startswith(t), len(nombre), posicion[bgg_id])
+
+    ids = sorted(orden, key=parecido)[:BGG_BATCH_DETALLE]
+    if not ids:
+        return []
+
+    try:
+        detalle_root = bgg_fetch_batch(ids, token)
+    except Exception:
+        return [base[i] for i in ids]  # sin detalle igual sirve: nombre + año del search
+
+    for item in detalle_root.findall("item"):
+        bgg_id = _int_o_none(item.get("id"))
+        if bgg_id not in base:
+            continue
+        d = base[bgg_id]
+        nombre_el = item.find("name[@type='primary']")
+        if nombre_el is not None:
+            d["nombre_bgg"] = nombre_el.get("value")
+        anio_el = item.find("yearpublished")
+        if anio_el is not None:
+            d["anio"] = _int_o_none(anio_el.get("value"))
+        thumb_el = item.find("thumbnail")
+        if thumb_el is not None and thumb_el.text:
+            d["thumbnail"] = thumb_el.text.strip()
+        d["es_expansion"] = item.get("type") == "boardgameexpansion"
+        rated_el = item.find("statistics/ratings/usersrated")
+        if rated_el is not None:
+            d["num_calificaciones"] = _int_o_none(rated_el.get("value"))
+
+    return [base[i] for i in ids]
+
+
+def bgg_buscar_enriquecido(termino: str) -> list[dict]:
+    """Busca por nombre en vivo en BGG y regresa la lista ya cruzada contra tu
+    biblioteca/indexados y ordenada por relevancia real (nombre exacto >
+    prefijo > ya la tienes > popularidad). Usada por /juegos/bgg-buscar, el
+    picker de juego de 'Agregar reglamento'."""
+    clave = termino.lower()
+    cacheado = _bgg_busqueda_cache.get(clave)
+    if cacheado and time.time() - cacheado[0] < BGG_BUSQUEDA_CACHE_TTL:
+        resultados = cacheado[1]
+    else:
+        resultados = bgg_buscar_items(termino)
+        _bgg_busqueda_cache[clave] = (time.time(), resultados)
+
+    if not resultados:
+        return []
+
+    ids = [r["bgg_id"] for r in resultados]
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
-    cur.execute("SELECT nombre FROM boardgames_stats.juegos WHERE bgg_id = %s LIMIT 1;", (bgg_id,))
-    row = cur.fetchone()
+    cur.execute(
+        "SELECT bgg_id, nombre FROM boardgames_stats.juegos WHERE bgg_id = ANY(%s);", (ids,)
+    )
+    en_biblioteca = {row[0]: row[1] for row in cur.fetchall()}
+    cur.execute(
+        f"SELECT DISTINCT juego FROM {params.DB_SCHEMA}.{params.CHUNKS_TABLE} WHERE juego = ANY(%s);",
+        (list(set(list(en_biblioteca.values()) + [r["nombre_bgg"] for r in resultados])),),
+    )
+    indexados = {row[0] for row in cur.fetchall()}
     cur.close()
     conn.close()
 
-    if row:
-        return {"encontrado": True, "nombre": row[0]}
-    return {"encontrado": False}
+    salida = []
+    for r in resultados:
+        nombre_local = en_biblioteca.get(r["bgg_id"])
+        salida.append({
+            **r,
+            "nombre": nombre_local or r["nombre_bgg"],
+            "en_biblioteca": nombre_local is not None,
+            "ya_indexado": (nombre_local or r["nombre_bgg"]) in indexados,
+        })
+
+    termino_lower = termino.lower()
+    salida.sort(key=lambda r: (
+        r["nombre"].lower() != termino_lower,
+        not r["nombre"].lower().startswith(termino_lower),
+        not r["en_biblioteca"],
+        -(r["num_calificaciones"] or 0),
+    ))
+    return salida
+
+
+@app.get("/juegos/bgg-buscar")
+def bgg_buscar(q: str, limite: int = 12):
+    """Busca por nombre en vivo en BGG para que al agregar un reglamento se
+    elija el juego de una lista real en vez de teclearlo a mano y terminar con
+    dos variantes del mismo juego indexadas.
+
+    Lo que hace el import 'limpio' es el cruce por bgg_id contra tu biblioteca:
+    si el juego ya esta en BG Stats se regresa el nombre local (el que usan los
+    chunks ya indexados), no el de BGG, para que el reglamento nuevo quede
+    colgado del mismo juego. `ya_indexado` avisa si ya hay chunks con ese
+    nombre, que es justo lo que rechaza /reglamentos/subir con 409."""
+    termino = q.strip()
+    if len(termino) < 3:
+        raise HTTPException(status_code=400, detail="Escribe al menos 3 letras para buscar en BGG.")
+    limite = max(1, min(limite, 30))
+    try:
+        resultados = bgg_buscar_enriquecido(termino)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"BoardGameGeek no respondio: {e}")
+    return resultados[:limite]
 
 
 @app.post("/reglamentos/subir")
@@ -1282,9 +1507,16 @@ def bgstats_sync_endpoint():
     return resultado
 
 
+MAX_TURNOS_HISTORIAL = 6  # turnos previos a mandar de vuelta al modelo, no todo el chat
+
+
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest):
-    contents = [types.Content(role="user", parts=[types.Part(text=req.pregunta)])]
+    contents = []
+    for turno in (req.historial or [])[-MAX_TURNOS_HISTORIAL:]:
+        contents.append(types.Content(role="user", parts=[types.Part(text=turno.pregunta)]))
+        contents.append(types.Content(role="model", parts=[types.Part(text=turno.respuesta)]))
+    contents.append(types.Content(role="user", parts=[types.Part(text=req.pregunta)]))
     fuentes: list[dict] = []
 
     system_instruction = SYSTEM_PROMPT
@@ -1295,7 +1527,7 @@ def ask(req: AskRequest):
             f"busqueda) tambien cuentan como parte de {req.juego}."
         )
 
-    MAX_ITERACIONES_HERRAMIENTAS = 5
+    MAX_ITERACIONES_HERRAMIENTAS = 8
     iteraciones = 0
     while True:
         iteraciones += 1
@@ -1349,12 +1581,21 @@ def ask(req: AskRequest):
                         return f"{juego} (expansion/modulo: {r['juego']})"
                     return r["juego"]
 
-                contenido = "\n\n".join(
-                    f"[{etiqueta(r)} | chunk {r['chunk_index']} | doc_type={r['doc_type']}]\n{r['texto']}"
-                    for r in resumen
-                )
+                if resumen:
+                    contenido = "\n\n".join(
+                        f"[{etiqueta(r)} | chunk {r['chunk_index']} | doc_type={r['doc_type']}]\n{r['texto']}"
+                        for r in resumen
+                    )
+                else:
+                    contenido = (
+                        "SIN RESULTADOS: no hay reglamento indexado para este juego/pregunta. "
+                        "NO respondas usando tu conocimiento general del entrenamiento — dile al "
+                        "usuario explicitamente que no tienes el reglamento indexado."
+                    )
             elif fc.name == "query_sql":
                 contenido = execute_sql(fc.args["sql"])
+            elif fc.name == "query_graph":
+                contenido = execute_cypher(fc.args["cypher"])
             elif fc.name == "bgg_lookup":
                 contenido = bgg_buscar_por_nombre(fc.args["nombre"])
             else:

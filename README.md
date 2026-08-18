@@ -10,7 +10,7 @@ Roadmap completo en la memoria del proyecto (Claude Code).
 **Estado actual:**
 - ✅ Fase 0 — pipeline de indexado (extraer → trocear → embeber → guardar en pgvector), validado con varios juegos reales, multilenguaje (es/en), OCR automatico como fallback para PDFs sin texto real, y expansiones ligadas al juego base.
 - ✅ Fase 2 — schema `boardgames_stats.*` (juegos/jugadores/lugares/partidas/partida_jugadores) sincronizado desde export de BG Stats, automatizado end-to-end via Google Drive + n8n (ver `source/bgstats_sync.py` y `POST /bgstats/sync`).
-- ✅ Fase 3 (version inicial) — backend `/ask` con 2 herramientas para Gemini: `search_rulebooks` (RAG) y `query_sql` (SQL de solo lectura sobre `boardgames_stats.*`, rol Postgres `boardgames_readonly` sin permisos de escritura). Gemini elige cual usar segun la pregunta.
+- ✅ Fase 3 — backend `/ask` con 3 herramientas para Gemini: `search_rulebooks` (RAG), `query_sql` (SQL de solo lectura sobre `boardgames_stats.*`, rol Postgres `boardgames_readonly` sin permisos de escritura) y `bgg_lookup` (busqueda en vivo en BoardGameGeek, ultimo recurso cuando un juego no esta en la biblioteca local ni tiene reglamento indexado — cachea el resultado en `boardgames_bgg.juegos_detalle` para no repetir el request). Gemini elige cual usar segun la pregunta, y se le indica ser decisivo: en cuanto tenga metadata suficiente para una opinion fundamentada, responder en vez de seguir iterando buscando confirmacion perfecta. **Agregado 2026-08-17:** `/ask` acepta un `historial` opcional (ultimos 6 turnos pregunta/respuesta) que se antepone a `contents` antes de llamar a Gemini, para que preguntas de seguimiento sin repetir el nombre del juego ("¿cuando se acaba la partida?") mantengan contexto — antes cada request empezaba de cero, sin memoria de la conversacion.
 - ✅ Fase 1 — ingesta de reglamentos sin SSH, validada end-to-end (subida real desde compu y desde telefono, ambas indexadas correctamente). Dos caminos, ambos disponibles en la app:
   1. **Subida directa**: pestaña "Agregar" → eliges archivo del dispositivo → llenas el formulario → indexa al toque (`POST /reglamentos/subir`).
   2. **Buzon asincrono**: subes el PDF/DOCX a una carpeta de Google Drive ("Reglamentos") desde cualquier dispositivo → un workflow de n8n lo baja solo a `pdfs_prueba/pendientes/` y mueve el original a una subcarpeta "Procesados" en Drive → la pestaña "Agregar" muestra un badge con el conteo y una lista de pendientes → completas el formulario despues, desde donde sea, y confirmas (`POST /reglamentos/confirmar`). Pensado para cuando subes el archivo en un momento y quieres poner el nombre/idioma despues, sin notificacion activa (se revisa la app cuando se abre, a proposito mas simple que configurar email/push).
@@ -21,18 +21,33 @@ Roadmap completo en la memoria del proyecto (Claude Code).
   - **Modelo de duración en modo solitario** (`source/duracion_solo_model.py`): dataset separado (`tag_solo=true`), features más simples + `min_jugadores`/`max_jugadores` de BGG (distingue solo puro de multijugador con Automa). MAE ~13 min. Endpoint `/bgstats/duracion-solo/predecir`.
   - **Red de amigos** (`boardgames_bgg.*`): partidas que amigos con cuenta de BGG registraron directo ahí (staging propio, `source/bgg_friend_plays_sync.py`, **nunca se fusiona con `boardgames_stats.*`** — unión solo en memoria para el modelo, nunca a nivel de tabla). Detección de bots/Automa (`tag_solo`) y plataformas digitales (`tag_digital`, ej. BGA). Identidades cruzadas a mano en `boardgames_bgg.jugadores_identificados` (~125 personas), lugares en `boardgames_bgg.ubicaciones_amigos_alias`.
   - **`boardgames_bgg.juego_familia`**: agrupa ediciones/reimpresiones del mismo juego (ej. Everdell + Complete Collection) para que el historial real no se fragmente por `bgg_id`; el chat (`query_sql`) lo usa automáticamente.
-  - **Grafo social** (Apache AGE, extensión sobre la misma Postgres, `source/grafo_social_sync.py`): nodos = personas (propias + identificadas de amigos), relaciones `JUEGA_CON_PROPIO`/`JUEGA_CON_AMIGOS` (separadas). Permite consultas multi-salto (quién conecta a X con Y, puentes entre redes) directo en SQL vía `cypher()`, sin motor de grafos aparte. Se actualiza en cada sync de BG Stats.
-  - **Calendario + vacaciones** (`source/calendario_sync.py`): visitas (iCloud) + viajes (`vacation_trips`, DB separada de la app Vacaciones) → `boardgames_stats.calendario_eventos`, cruzable con partidas/grupo_social ("¿con quién juego cuando estoy de viaje?").
+  - **Grafo social** (Apache AGE, extensión sobre la misma Postgres, `source/grafo_social_sync.py`): nodos = personas (propias + identificadas de amigos + visitantes) y un nodo `Casa`; relaciones `JUEGA_CON_PROPIO`/`JUEGA_CON_AMIGOS` (separadas) y `VISITO` (persona → Casa, peso = número de visitas, desde `calendario_eventos`). Los nodos `Persona` de visitas se crean directo del nombre del evento, no solo de quien ya juega — alguien puede visitar y afectar patrones de consumo sin haber jugado nunca. Permite consultas multi-salto (quién conecta a X con Y, puentes entre redes) directo en SQL vía `cypher()`, sin motor de grafos aparte. Se actualiza en cada sync de BG Stats.
+  - **Calendario + vacaciones** (`source/calendario_sync.py`): visitas (iCloud **+ `home_visits`** de la app Vacaciones, dos fuentes fusionadas) + viajes (`vacation_trips`, misma DB separada) → `boardgames_stats.calendario_eventos`, cruzable con partidas/grupo_social ("¿con quién juego cuando estoy de viaje?"). Nombres de visita que no matchean exacto contra `jugadores` se resuelven vía `boardgames_stats.visita_nombre_alias` (alias manuales que sobreviven re-syncs, mismo patrón que `jugadores_identificados` para amigos de BGG).
   - **3 badges en la app** (amigos nuevos con BGG, lugares/fuentes de compra sin normalizar, partidas anónimas sin grupo social) — detectados automático en cada sync, se resuelven desde la UI.
 
-**Nombre del juego al agregar un reglamento:** se autocompleta SOLO si el juego ya esta
-en tu biblioteca de BG Stats (busqueda local por `bgg_id` extraido de un link de BGG que
-pegues, sin llamar a la API de BGG — `GET /juegos/bgg-lookup`); para juegos nuevos se
-escribe a mano. Se aplico a la API oficial de BGG el 2026-08-09
-(boardgamegeek.com/using_the_xml_api, requiere aprobacion, "una semana o mas" segun su
-propia politica) — mientras se aprueba, el flujo funciona igual, solo sin autocompletado
-para juegos nuevos. iCloud Drive se descarto como alternativa a Google Drive para el
-buzon asincrono — Apple no ofrece API publica para automatizacion de terceros.
+**Nombre del juego al agregar un reglamento:** ya no se escribe a mano. El campo busca en
+vivo en BGG (`GET /juegos/bgg-buscar?q=`, xmlapi2 `search` + un `thing` en batch para
+resolver nombre primario/imagen/popularidad) y se eligen resultados de una lista con
+caratula, año y si es expansion. Lo que hace el import limpio es el cruce por `bgg_id`
+contra `boardgames_stats.juegos`: si el juego ya esta en tu biblioteca se usa el nombre
+local — el mismo con el que estan indexados sus chunks — en vez del de BGG, asi que
+buscar "aventureros al tren" o "los colonos de catan" deja `Ticket to Ride` y `CATAN`,
+no un nombre nuevo que partiria el reglamento en dos juegos distintos. Cada resultado
+marca ademas `en_biblioteca` y `ya_indexado` (este ultimo es justo lo que rechaza
+`/reglamentos/subir` con 409). El search de BGG no viene ordenado por relevancia — se
+pre-ordena por parecido del nombre antes de pedir el detalle, si no para "carcassonne"
+salen fan-expansions de 5 votos y el juego base ni aparece. Resultados cacheados 10 min
+en memoria porque el autocompletado dispara muchas busquedas.
+**Eliminado 2026-08-17:** `GET /juegos/bgg-lookup` (el campo aparte para pegar un link de
+BGG) se quito por completo — habia dos buscadores distintos para el mismo problema, y el
+de "Juego" ya cubre ambos casos (nombre exacto o parecido) con mejor UX (lista de opciones
+en vez de un solo resultado auto-resuelto). El ranking usado ahi se extrajo a
+`bgg_buscar_enriquecido()` (compartido, un solo criterio de "cual es el mejor match" en
+vez de dos rankings distintos para la misma busqueda — bug real que se encontro al hacerlo:
+el fallback por nombre usaba el preordenamiento burdo de `bgg_buscar_items()` en vez del
+ranking final con popularidad/biblioteca, dando resultados incorrectos).
+iCloud Drive se descarto como alternativa a Google Drive para el buzon asincrono — Apple
+no ofrece API publica para automatizacion de terceros.
 
 **Limitacion conocida:** el backend usa el tier gratuito de la API de Gemini, que tiene
 un limite duro de 20 requests/dia por modelo — cada pregunta consume 2-3 requests
@@ -130,6 +145,6 @@ fusiona con `boardgames_stats.*`), `jugadores_identificados`, `ubicaciones_amigo
 `clima_ubicacion_diario`/`clima_cdmx_diario`, `juego_familia`, `amigos_nuevos_pendientes`
 (badge).
 
-**`red_social`** (Apache AGE) — grafo de personas + relaciones `JUEGA_CON_PROPIO`/
-`JUEGA_CON_AMIGOS`. Requiere `LOAD 'age'; SET search_path = ag_catalog, "$user", public;`
+**`red_social`** (Apache AGE) — grafo de personas + nodo `Casa` + relaciones `JUEGA_CON_PROPIO`/
+`JUEGA_CON_AMIGOS`/`VISITO`. Requiere `LOAD 'age'; SET search_path = ag_catalog, "$user", public;`
 antes de usar `cypher()`. Ver `source/grafo_social_sync.py`.
