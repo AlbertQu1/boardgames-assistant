@@ -55,9 +55,9 @@ def fetch_home_visits(hoy: date) -> list[dict]:
     vacation_trips, tabla nueva) -- segunda fuente de eventos tipo='visita'
     ademas del calendario de iCloud, para poder registrar una visita desde
     la app directamente sin depender de tener el evento en el calendario."""
-    conn = psycopg2.connect(os.environ.get("VACATION_DB_URL", "postgresql://albertqu@/vacaciones"))
+    conn = psycopg2.connect(os.environ.get("VACATION_DB_URL", "postgresql://albertqu@/casa"))
     cur = conn.cursor()
-    cur.execute("SELECT visitor_name, arrival_date, departure_date FROM home_visits WHERE arrival_date <= %s", (hoy,))
+    cur.execute("SELECT visitor_name, arrival_date, departure_date FROM vacaciones.home_visits WHERE arrival_date <= %s", (hoy,))
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -78,9 +78,9 @@ def fetch_vacation_trips(hoy: date) -> list[dict]:
     fecha_fin} que fetch_ical_events, con fecha_fin ya convertida a
     EXCLUSIVA (+1 dia) para respetar el contrato existente de la tabla
     calendario_eventos, documentado en source/api.py."""
-    conn = psycopg2.connect(os.environ.get("VACATION_DB_URL", "postgresql://albertqu@/vacaciones"))
+    conn = psycopg2.connect(os.environ.get("VACATION_DB_URL", "postgresql://albertqu@/casa"))
     cur = conn.cursor()
-    cur.execute("SELECT destination, departure_date, return_date FROM vacation_trips WHERE departure_date <= %s", (hoy,))
+    cur.execute("SELECT destination, departure_date, return_date FROM vacaciones.vacation_trips WHERE departure_date <= %s", (hoy,))
     rows = cur.fetchall()
     cur.close()
     conn.close()
