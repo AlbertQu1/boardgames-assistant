@@ -15,9 +15,26 @@ argument of cypher function must be a parameter"). En vez de eso los
 valores se embeben como literales Cypher con escape manual
 (cypher_str) -- mismo patron validado a mano antes de escribir esto.
 
-Idempotente via recalculo completo (DELETE de todo el grafo + re-insert),
-mas simple que diffs incrementales con un dataset de este tamano. Correr
-de nuevo despues de cada sync para mantener el grafo actualizado.
+Idempotente via recalculo: se borran solo las relaciones que este script
+controla (JUEGA_CON_PROPIO, JUEGA_CON_AMIGOS, VISITO) y se reconstruyen,
+sin tocar nodos Persona/Casa ni otro tipo de relacion (Evento/ASISTIO, que
+pertenece a personal-assistant/source/graph_sync.py). Antes (hasta
+2026-08-17) hacia un DETACH DELETE de TODO el grafo -- borraba tambien lo
+de graph_sync.py y cualquier fusion manual de duplicados, cada vez que
+llegaba un export nuevo de BG Stats. Corregido el mismo dia que se
+encontro, tras una sesion completa de fusionar duplicados a mano
+(Grace/Hilcris/Olga/etc.) que un sync nuevo hubiera deshecho por completo.
+
+Cada nombre crudo de jugador se resuelve contra personal_wiki.personas
+(nombre_canonico o alias, case-insensitive) ANTES de crear/tocar el nodo
+-- mismo patron ya usado para el problema de "angel ulises" (nombre de
+visita que no matcheaba exacto contra el jugador real), aplicado aqui de
+forma general para que un nodo corto (ej. "Grace") jamas se vuelva a crear
+por separado si ya existe una entrada completa ("Grace Quintero") en el
+catalogo. Cache en memoria por corrida (un nombre no cambia a media
+ejecucion).
+
+Correr de nuevo despues de cada sync para mantener el grafo actualizado.
 
 Uso:
     python source/grafo_social_sync.py
@@ -39,6 +56,58 @@ def cypher_str(valor) -> str:
     if valor is None:
         return "null"
     return "'" + str(valor).replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def resolver_nombre_canonico(cur, cache: dict[str, str], nombre_crudo: str) -> str:
+    """Busca nombre_crudo en personal_wiki.personas (nombre_canonico o
+    alias). Si hay match, regresa el nombre_canonico completo -- asi
+    "Grace" siempre resuelve a "Grace Quintero" y nunca se vuelve a crear
+    como nodo aparte. Sin match, regresa el nombre tal cual."""
+    clave = nombre_crudo.strip().lower()
+    if clave in cache:
+        return cache[clave]
+    cur.execute(
+        """
+        SELECT nombre_canonico FROM personal_wiki.personas
+        WHERE lower(nombre_canonico) = %s OR %s = ANY(SELECT lower(a) FROM unnest(alias) AS a)
+        """,
+        (clave, clave),
+    )
+    row = cur.fetchone()
+    resultado = row[0] if row else nombre_crudo
+    cache[clave] = resultado
+    return resultado
+
+
+def canonicalizar_nodos(cur, cache: dict[str, str], nodos: dict[str, str | None]) -> dict[str, str | None]:
+    resultado: dict[str, str | None] = {}
+    for nombre, grupo in nodos.items():
+        canon = resolver_nombre_canonico(cur, cache, nombre)
+        if grupo or canon not in resultado:
+            resultado[canon] = grupo or resultado.get(canon)
+    return resultado
+
+
+def canonicalizar_edges(
+    cur, cache: dict[str, str], edges: dict[tuple[str, str], int]
+) -> dict[tuple[str, str], int]:
+    resultado: dict[tuple[str, str], int] = {}
+    for (n1, n2), peso in edges.items():
+        c1 = resolver_nombre_canonico(cur, cache, n1)
+        c2 = resolver_nombre_canonico(cur, cache, n2)
+        if c1 == c2:
+            continue
+        clave = tuple(sorted((c1, c2)))
+        resultado[clave] = resultado.get(clave, 0) + peso
+    return resultado
+
+
+def canonicalizar_visitas(cur, cache: dict[str, str], visitas: dict[str, int]) -> dict[str, int]:
+    resultado: dict[str, int] = {}
+    for nombre, peso in visitas.items():
+        canon = resolver_nombre_canonico(cur, cache, nombre)
+        resultado[canon] = resultado.get(canon, 0) + peso
+    return resultado
 
 
 def construir_edges_propio(cur):
@@ -122,13 +191,26 @@ def sync() -> dict:
     nodos_amigos, edges_amigos = construir_edges_amigos(cur)
     nodos_visitas, visitas = construir_visitas(cur)
 
+    cache_nombres: dict[str, str] = {}
+    nodos_propio = canonicalizar_nodos(cur, cache_nombres, nodos_propio)
+    edges_propio = canonicalizar_edges(cur, cache_nombres, edges_propio)
+    nodos_amigos = canonicalizar_nodos(cur, cache_nombres, nodos_amigos)
+    edges_amigos = canonicalizar_edges(cur, cache_nombres, edges_amigos)
+    nodos_visitas = canonicalizar_nodos(cur, cache_nombres, nodos_visitas)
+    visitas = canonicalizar_visitas(cur, cache_nombres, visitas)
+
     todos_los_nodos = dict(nodos_propio)
     for n, g in nodos_amigos.items():
         todos_los_nodos.setdefault(n, g)
     for n, g in nodos_visitas.items():
         todos_los_nodos.setdefault(n, g)
 
-    cur.execute(f"SELECT * FROM cypher('{GRAFO}', $$ MATCH (n) DETACH DELETE n $$) AS (v agtype)")
+    # Borrado quirurgico: solo las relaciones que este script controla, no
+    # los nodos (Persona/Casa se preservan con cualquier propiedad que
+    # otros scripts les hayan puesto, ej. cumpleanos) ni Evento/ASISTIO
+    # (pertenece a personal-assistant/source/graph_sync.py).
+    for tipo in ("JUEGA_CON_PROPIO", "JUEGA_CON_AMIGOS", "VISITO"):
+        cur.execute(f"SELECT * FROM cypher('{GRAFO}', $$ MATCH ()-[r:{tipo}]-() DELETE r $$) AS (v agtype)")
 
     for nombre, grupo in todos_los_nodos.items():
         cur.execute(
