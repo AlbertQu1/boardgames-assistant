@@ -10,7 +10,6 @@ dependencies:
       - pgvector
       - pypdf
       - python-docx
-      - sentence-transformers
       - python-dotenv
       - fastapi
       - uvicorn[standard]

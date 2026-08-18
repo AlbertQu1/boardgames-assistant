@@ -11,19 +11,19 @@ import os
 
 import psycopg2
 from dotenv import load_dotenv
+from pgvector import Vector
 from pgvector.psycopg2 import register_vector
-from sentence_transformers import SentenceTransformer
 
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import params
+from source.embeddings_client import embed
 
 load_dotenv()
 
 
 def search(pregunta: str, juego: str | None, idioma: str | None, top_k: int = 5):
-    model = SentenceTransformer(params.EMBEDDING_MODEL)
-    query_embedding = model.encode(pregunta)
+    query_embedding = Vector(embed([pregunta])[0])
 
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     register_vector(conn)

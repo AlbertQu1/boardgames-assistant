@@ -15,12 +15,14 @@ import pytesseract
 from dotenv import load_dotenv
 from docx import Document as DocxDocument
 from pdf2image import convert_from_path
+from pgvector import Vector
+from pgvector.psycopg2 import register_vector
 from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
 
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import params
+from source.embeddings_client import embed
 
 load_dotenv()
 
@@ -72,6 +74,7 @@ def index_pdf(juego: str, pdf_path: str, idioma: str, doc_type: str, juego_base:
     source_pdf = os.path.basename(pdf_path)
 
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    register_vector(conn)
     cur = conn.cursor()
 
     cur.execute(
@@ -91,8 +94,7 @@ def index_pdf(juego: str, pdf_path: str, idioma: str, doc_type: str, juego_base:
     text = extract_text(pdf_path)
     chunks = chunk_text(text, params.CHUNK_SIZE, params.CHUNK_OVERLAP)
 
-    model = SentenceTransformer(params.EMBEDDING_MODEL)
-    embeddings = model.encode(chunks, show_progress_bar=True)
+    embeddings = embed(chunks)
 
     cur.execute(
         f"""
@@ -108,7 +110,7 @@ def index_pdf(juego: str, pdf_path: str, idioma: str, doc_type: str, juego_base:
                 (juego, source_pdf, chunk_index, chunk_text, embedding, idioma, doc_type, juego_base, file_hash)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (juego, source_pdf, i, chunk, embedding.tolist(), idioma, doc_type, juego_base, file_hash),
+            (juego, source_pdf, i, chunk, Vector(embedding), idioma, doc_type, juego_base, file_hash),
         )
     conn.commit()
     cur.close()
