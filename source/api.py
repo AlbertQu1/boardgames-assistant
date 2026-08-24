@@ -1325,15 +1325,28 @@ def bgstats_duracion_solo_predecir(juego: str):
     )
     fila = cur.fetchone()
     if fila is None:
-        conn.close()
-        raise HTTPException(status_code=404, detail=f"'{juego}' no tiene datos de BGG cacheados")
+        # mismo fallback que el modo normal: si no esta en la biblioteca
+        # local, buscarlo en vivo en BGG (incluye min/max jugadores, que solo
+        # se agregaron a juegos_detalle para poder cubrir este caso).
+        resultado_bgg = bgg_buscar_por_nombre(juego)
+        try:
+            d = json.loads(resultado_bgg)
+        except json.JSONDecodeError:
+            conn.close()
+            raise HTTPException(status_code=404, detail=resultado_bgg)
+        peso = d.get("peso_complejidad")
+        min_pt = d.get("min_playtime")
+        max_pt = d.get("max_playtime")
+        calificacion = d.get("calificacion_promedio")
+        min_j = d.get("min_jugadores")
+        max_j = d.get("max_jugadores")
+    else:
+        peso, min_pt, max_pt, calificacion, min_j, max_j = fila
 
     r = entrenar_duracion_solo(conn)
     conn.close()
     if r is None:
         raise HTTPException(status_code=422, detail="No hay suficientes datos para entrenar el modelo")
-
-    peso, min_pt, max_pt, calificacion, min_j, max_j = fila
     valores = {
         "peso_complejidad": peso,
         "min_playtime": min_pt,

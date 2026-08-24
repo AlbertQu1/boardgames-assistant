@@ -100,6 +100,8 @@ def parse_item(item: ET.Element) -> dict:
         "categorias": categorias or None,
         "mecanicas": mecanicas or None,
         "peso_complejidad": peso,
+        "min_jugadores": int(attr("minplayers")) if attr("minplayers") else None,
+        "max_jugadores": int(attr("maxplayers")) if attr("maxplayers") else None,
         "min_playtime": int(attr("minplaytime")) if attr("minplaytime") else None,
         "max_playtime": int(attr("maxplaytime")) if attr("maxplaytime") else None,
         "min_age": int(attr("minage")) if attr("minage") else None,
@@ -119,13 +121,14 @@ def guardar_detalle(cur, d: dict) -> None:
         """
         INSERT INTO boardgames_bgg.juegos_detalle
             (bgg_id, descripcion, categorias, mecanicas, peso_complejidad,
-             min_playtime, max_playtime, min_age, imagen_url,
+             min_jugadores, max_jugadores, min_playtime, max_playtime, min_age, imagen_url,
              numero_jugadores_sugerido, dependencia_idioma,
              calificacion_promedio, calificacion_bayes, num_calificaciones, sincronizado_en)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, now())
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, now())
         ON CONFLICT (bgg_id) DO UPDATE SET
             descripcion = EXCLUDED.descripcion, categorias = EXCLUDED.categorias,
             mecanicas = EXCLUDED.mecanicas, peso_complejidad = EXCLUDED.peso_complejidad,
+            min_jugadores = EXCLUDED.min_jugadores, max_jugadores = EXCLUDED.max_jugadores,
             min_playtime = EXCLUDED.min_playtime, max_playtime = EXCLUDED.max_playtime,
             min_age = EXCLUDED.min_age, imagen_url = EXCLUDED.imagen_url,
             numero_jugadores_sugerido = EXCLUDED.numero_jugadores_sugerido,
@@ -137,7 +140,8 @@ def guardar_detalle(cur, d: dict) -> None:
         """,
         (
             d["bgg_id"], d["descripcion"], d["categorias"], d["mecanicas"],
-            d["peso_complejidad"], d["min_playtime"], d["max_playtime"],
+            d["peso_complejidad"], d["min_jugadores"], d["max_jugadores"],
+            d["min_playtime"], d["max_playtime"],
             d["min_age"], d["imagen_url"],
             json.dumps(d["numero_jugadores_sugerido"]) if d["numero_jugadores_sugerido"] else None,
             d["dependencia_idioma"], d["calificacion_promedio"],
