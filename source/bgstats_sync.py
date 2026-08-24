@@ -118,6 +118,26 @@ def tiene_tag(play: dict, tag_id) -> bool:
     return any(t.get("tagRefId") == tag_id for t in play.get("tags", []))
 
 
+def es_solo(play: dict, tag_solo_id, jugadores_por_id: dict) -> bool:
+    """True si la partida esta etiquetada "Solo" en BG Stats O si de hecho
+    solo hubo un jugador humano (los bots/Automa se nombran con 🤖 al final,
+    misma convencion que ya usan grafo_social_sync.py y api.py para no
+    contarlos como companeros reales).
+
+    El tag manual se olvida seguido -- al 2026-08-24 habia 11 partidas
+    claramente en solitario sin el (ej. Robinson Crusoe contra Friday 🤖 y
+    Dog 🤖, GROVE que es solitario puro), que quedaban fuera del dataset del
+    modelo de duracion solo (~317 filas, cada partida real pesa)."""
+    if tiene_tag(play, tag_solo_id):
+        return True
+    humanos = 0
+    for ps in play.get("playerScores", []):
+        nombre = ps.get("anonymousName") or jugadores_por_id.get(ps.get("playerRefId"), "")
+        if "🤖" not in (nombre or ""):
+            humanos += 1
+    return humanos == 1
+
+
 def cargar_alias_compra(cur) -> dict:
     cur.execute("SELECT alias, fuente_canonica, lugar_uuid FROM boardgames_stats.fuentes_compra_alias")
     return {alias: (canonica, lugar_uuid) for alias, canonica, lugar_uuid in cur.fetchall()}
@@ -422,6 +442,8 @@ def sync(path: str) -> dict:
     cur.execute("SELECT partida_uuid, lugar_uuid FROM boardgames_stats.partida_lugar_override")
     lugar_override = {str(partida_uuid).lower(): lugar_uuid for partida_uuid, lugar_uuid in cur.fetchall()}
     tag_ids = resolver_tag_ids(data)
+    # id -> nombre, para detectar bots (🤖) al inferir tag_solo (ver es_solo)
+    jugadores_por_id = {p["id"]: limpiar_nombre_prefijo(p["name"]) for p in data["players"]}
 
     # partidas + partida_jugadores
     for play in data["plays"]:
@@ -450,7 +472,8 @@ def sync(path: str) -> dict:
                 play["uuid"], juego_id_a_uuid.get(play["gameRefId"]),
                 lugar_uuid_final, play["playDate"], play.get("durationMin"),
                 play.get("comments"), play.get("usesTeams"), expansiones or None, play.get("modificationDate"),
-                json.dumps(play), tiene_tag(play, tag_ids["solo"]), tiene_tag(play, tag_ids["digital"]),
+                json.dumps(play), es_solo(play, tag_ids["solo"], jugadores_por_id),
+                tiene_tag(play, tag_ids["digital"]),
             ),
         )
 
