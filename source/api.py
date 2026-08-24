@@ -9,6 +9,7 @@ Uso:
 
 import datetime
 import json
+import math
 import mimetypes
 import os
 import re
@@ -297,27 +298,26 @@ def bgg_buscar_por_nombre(nombre: str) -> str:
     """Ultimo recurso del agente cuando un juego no esta en la biblioteca
     local ni tiene reglamento indexado: busca en vivo en BGG (search +
     thing) y cachea el resultado en boardgames_bgg.juegos_detalle con el
-    mismo upsert que bgg_cache_sync.py, para no volver a pedirlo despues."""
-    token = os.environ["BGG_API_TOKEN"]
+    mismo upsert que bgg_cache_sync.py, para no volver a pedirlo despues.
+    Reusa bgg_buscar_enriquecido() -- ordena por nombre exacto > prefijo >
+    ya en biblioteca > popularidad (num_calificaciones), no solo parecido de
+    nombre. bgg_buscar_items() por si solo NO alcanza: pre-ordena antes de
+    saber la popularidad, asi que para 'Robinson Crusoe' traia una reedicion
+    oscura con 0 calificaciones antes que 'Robinson Crusoe: Adventures on
+    the Cursed Island' (el juego real, miles de calificaciones) -- mismo
+    ajuste de orden que ya tenia bgg_buscar_enriquecido() para el picker de
+    'Agregar reglamento', solo que esta funcion no lo estaba usando."""
     try:
-        resp = requests.get(
-            BGG_SEARCH_URL,
-            params={"query": nombre, "type": "boardgame"},
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        root = ET.fromstring(resp.content)
+        candidatos = bgg_buscar_enriquecido(nombre)
     except Exception as e:
         return f"Error buscando '{nombre}' en BGG: {e}"
 
-    items = root.findall("item")
-    if not items:
+    if not candidatos:
         return f"No se encontro '{nombre}' en BoardGameGeek."
 
-    bgg_id = int(items[0].get("id"))
-    nombre_el = items[0].find("name")
-    nombre_bgg = nombre_el.get("value") if nombre_el is not None else nombre
+    token = os.environ["BGG_API_TOKEN"]
+    bgg_id = candidatos[0]["bgg_id"]
+    nombre_bgg = candidatos[0]["nombre_bgg"]
 
     try:
         detalle_root = bgg_fetch_batch([bgg_id], token)
@@ -597,13 +597,24 @@ def bgg_buscar_enriquecido(termino: str) -> list[dict]:
             "ya_indexado": (nombre_local or r["nombre_bgg"]) in indexados,
         })
 
+    # Puntaje combinado en vez de prioridad estricta (nombre exacto > prefijo
+    # > popularidad) -- una prioridad estricta deja que un juego oscuro con
+    # nombre exacto (ej. "Robinson Crusoe", 7 calificaciones) le gane a la
+    # version real y popular que casi todos quieren decir (ej. "Robinson
+    # Crusoe: Adventures on the Cursed Island", 47k calificaciones) solo por
+    # tener el nombre mas corto. Escala log10 para que la popularidad pueda
+    # revertir un match exacto cuando la diferencia es enorme, sin que dos
+    # juegos de popularidad similar terminen empatados por casualidad.
     termino_lower = termino.lower()
-    salida.sort(key=lambda r: (
-        r["nombre"].lower() != termino_lower,
-        not r["nombre"].lower().startswith(termino_lower),
-        not r["en_biblioteca"],
-        -(r["num_calificaciones"] or 0),
-    ))
+
+    def puntaje(r):
+        nombre_lower = r["nombre"].lower()
+        bonus_nombre = 3.0 if nombre_lower == termino_lower else (1.5 if nombre_lower.startswith(termino_lower) else 0.0)
+        bonus_biblioteca = 2.0 if r["en_biblioteca"] else 0.0
+        popularidad = math.log10((r["num_calificaciones"] or 0) + 1)
+        return bonus_nombre + bonus_biblioteca + popularidad
+
+    salida.sort(key=puntaje, reverse=True)
     return salida
 
 
@@ -1227,15 +1238,29 @@ def bgstats_duracion_predecir(
     )
     fila = cur.fetchone()
     if fila is None:
-        conn.close()
-        raise HTTPException(status_code=404, detail=f"'{juego}' no tiene datos de BGG cacheados")
+        # no esta en la biblioteca local -- cae a buscarlo en vivo en BGG
+        # (mismo tool que usa el chat, bgg_buscar_por_nombre) en vez de
+        # rendirse: el modelo solo necesita las features de BGG del juego,
+        # no que ya lo hayas jugado tu. Cachea el resultado de paso, asi que
+        # la proxima vez que se busque el mismo juego ya sale del join local.
+        resultado_bgg = bgg_buscar_por_nombre(juego)
+        try:
+            d = json.loads(resultado_bgg)
+        except json.JSONDecodeError:
+            conn.close()
+            raise HTTPException(status_code=404, detail=resultado_bgg)
+        peso = d.get("peso_complejidad")
+        dependencia = d.get("dependencia_idioma")
+        min_pt = d.get("min_playtime")
+        max_pt = d.get("max_playtime")
+        calificacion = d.get("calificacion_promedio")
+    else:
+        peso, dependencia, min_pt, max_pt, calificacion = fila
 
     r = entrenar_duracion(conn, incluir_amigos=incluir_amigos)
     conn.close()
     if r is None:
         raise HTTPException(status_code=422, detail="No hay suficientes datos para entrenar el modelo")
-
-    peso, dependencia, min_pt, max_pt, calificacion = fila
     valores = {
         "peso_complejidad": peso,
         "dependencia_idioma": dependencia,
