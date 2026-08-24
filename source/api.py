@@ -1132,7 +1132,13 @@ def bgstats_coleccion():
 
 @app.get("/bgstats/duracion/juegos")
 def bgstats_duracion_juegos():
-    """Juegos con datos de BGG cacheados (los unicos que se pueden predecir)."""
+    """Juegos con datos de BGG cacheados (los unicos que se pueden predecir).
+    NO se filtra por es_expansion -- BGG lo marca mal para varios juegos base
+    (ej. "Ticket to Ride" y "Viticulture Essential Edition" ambos tienen
+    es_expansion=true en los datos de BGG pese a ser el juego base normal,
+    mismo problema ya documentado en el system prompt del chat). Filtrar por
+    ese campo da falsos negativos reales -- mejor mostrar de mas (alguna
+    expansion real aparece tambien) que perder juegos base completos."""
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
     cur.execute(
@@ -1140,7 +1146,7 @@ def bgstats_duracion_juegos():
         SELECT j.nombre, j.min_jugadores, j.max_jugadores
         FROM boardgames_stats.juegos j
         JOIN boardgames_bgg.juegos_detalle d ON d.bgg_id = j.bgg_id
-        WHERE d.peso_complejidad IS NOT NULL AND NOT j.es_expansion
+        WHERE d.peso_complejidad IS NOT NULL
         ORDER BY j.nombre
         """
     )
