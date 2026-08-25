@@ -29,6 +29,13 @@ load_dotenv()
 FEATURES_BASE = [
     "peso_complejidad", "dependencia_idioma", "temp_media_c", "calificacion_promedio",
     "num_jugadores", "min_playtime", "max_playtime", "tag_digital", "usa_expansion", "tag_solo",
+    # historial real del MISMO juego -- sin esto el modelo generalizaba solo por
+    # peso/playtime de BGG e ignoraba lo que ya sabe de ese titulo. En el modelo
+    # solo resulto el feature mas fuerte con diferencia (+29.6 vs +1.8 de peso).
+    # media_juego_propia es leave-one-out al entrenar (se resta la fila misma)
+    # para no filtrar el target; media_juego_amigos viene de plays_amigos, que
+    # no es target de este modelo, asi que no necesita LOO.
+    "media_juego_propia", "n_partidas_juego", "media_juego_amigos",
 ]
 # categoria_lugar: diccionario armado a mano con Alberto (sesion 2026-08-11)
 # cruzando tags "Location" de BG Stats donde existian + contexto que el sabe
@@ -74,12 +81,35 @@ FEATURES = (
     + [f"grupo_{g}" for g in CATEGORIAS_GRUPO]
     + [f"dia_{d}" for d in DIAS_SEMANA]
 )
+# las 3 features de historial viven al final de FEATURES_BASE, o sea a MITAD
+# del vector completo (antes de los dummies), no al final -- por eso el
+# fallback se arma quitando estos indices y no un slice.
+FEATURES_HISTORIAL = ["media_juego_propia", "n_partidas_juego", "media_juego_amigos"]
+IDX_HISTORIAL = [FEATURES.index(f) for f in FEATURES_HISTORIAL]
+FEATURES_SIN_HISTORIAL = [f for f in FEATURES if f not in FEATURES_HISTORIAL]
+
+
+CTE_HISTORIAL = """
+    WITH propias AS (
+        SELECT p2.juego_uuid, sum(p2.duracion_min)::numeric AS suma, count(*) AS n
+        FROM boardgames_stats.partidas p2
+        WHERE p2.duracion_min > 0
+        GROUP BY p2.juego_uuid
+    ),
+    amigos_juego AS (
+        SELECT pa2.bgg_game_id, sum(pa2.duracion_min)::numeric AS suma, count(*) AS n
+        FROM boardgames_bgg.plays_amigos pa2
+        WHERE pa2.usable_para_analisis AND pa2.duracion_min > 0
+        GROUP BY pa2.bgg_game_id
+    )
+"""
 
 
 def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
     cur = conn.cursor()
     cur.execute(
-        """
+        CTE_HISTORIAL
+        + """
         SELECT p.duracion_min, d.peso_complejidad, d.dependencia_idioma,
                c.temp_media_c, d.calificacion_promedio,
                (SELECT count(*) FROM boardgames_stats.partida_jugadores pj WHERE pj.partida_uuid = p.uuid) AS num_jugadores,
@@ -96,13 +126,18 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
                        WHERE pj2.partida_uuid = p.uuid AND jg.grupo_social IS NOT NULL
                    )
                ) AS grupo_social,
-               EXTRACT(DOW FROM p.fecha)::int AS dia_semana
+               EXTRACT(DOW FROM p.fecha)::int AS dia_semana,
+               CASE WHEN pr.n > 1 THEN (pr.suma - p.duracion_min) / (pr.n - 1) END AS media_juego_propia,
+               pr.n - 1 AS n_partidas_juego,
+               CASE WHEN am.n > 0 THEN am.suma / am.n END AS media_juego_amigos
         FROM boardgames_stats.partidas p
         JOIN boardgames_stats.juegos j ON j.uuid = p.juego_uuid
         JOIN boardgames_bgg.juegos_detalle d ON d.bgg_id = j.bgg_id
         LEFT JOIN boardgames_stats.clima_diario c ON c.lugar_uuid = p.lugar_uuid AND c.fecha = p.fecha::date
         LEFT JOIN boardgames_stats.lugares l ON l.uuid = p.lugar_uuid
         LEFT JOIN boardgames_stats.partida_grupo_social_override gso ON gso.partida_uuid = p.uuid
+        LEFT JOIN propias pr ON pr.juego_uuid = p.juego_uuid
+        LEFT JOIN amigos_juego am ON am.bgg_game_id = j.bgg_id
         WHERE p.duracion_min > 0 AND d.peso_complejidad IS NOT NULL
         """
     )
@@ -124,7 +159,8 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
         # Reformers) cruzando cualquier jugador listado; si nada matchea, queda
         # NULL y el entrenamiento rellena con la mediana como dato faltante.
         cur.execute(
-            """
+            CTE_HISTORIAL
+            + """
             SELECT pa.duracion_min, d.peso_complejidad, d.dependencia_idioma,
                    COALESCE(cu.temp_media_c, cc.temp_media_c) AS temp_media_c,
                    d.calificacion_promedio,
@@ -149,13 +185,22 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
                            LIMIT 1
                        )
                    ) AS grupo_social,
-                   EXTRACT(DOW FROM pa.fecha)::int AS dia_semana
+                   EXTRACT(DOW FROM pa.fecha)::int AS dia_semana,
+                   -- para una fila de amigo, "propia" sigue siendo el historial de
+                   -- Alberto del mismo juego (no hay fila propia que restar, asi
+                   -- que no aplica leave-one-out); el LOO va del lado de amigos.
+                   CASE WHEN pr.n > 0 THEN pr.suma / pr.n END AS media_juego_propia,
+                   COALESCE(pr.n, 0) AS n_partidas_juego,
+                   CASE WHEN am.n > 1 THEN (am.suma - pa.duracion_min) / (am.n - 1) END AS media_juego_amigos
             FROM boardgames_bgg.plays_amigos pa
             JOIN boardgames_bgg.juegos_detalle d ON d.bgg_id = pa.bgg_game_id
             LEFT JOIN boardgames_bgg.ubicaciones_amigos_alias ua ON ua.ubicacion_raw = pa.ubicacion
             LEFT JOIN boardgames_bgg.clima_ubicacion_diario cu
                 ON cu.ubicacion_normalizada = pa.ubicacion_normalizada AND cu.fecha = pa.fecha
             LEFT JOIN boardgames_bgg.clima_cdmx_diario cc ON cc.fecha = pa.fecha
+            LEFT JOIN boardgames_stats.juegos jp ON jp.bgg_id = pa.bgg_game_id
+            LEFT JOIN propias pr ON pr.juego_uuid = jp.uuid
+            LEFT JOIN amigos_juego am ON am.bgg_game_id = pa.bgg_game_id
             WHERE pa.usable_para_analisis AND pa.duracion_min > 0 AND d.peso_complejidad IS NOT NULL
             """
         )
@@ -173,60 +218,69 @@ def fila_con_categoria(
     return base + dummies_lugar + dummies_grupo + dummies_dia
 
 
+def _ajustar(y: np.ndarray, x_raw: np.ndarray, n_filas: int) -> dict:
+    """Entrena los 3 candidatos sobre una matriz ya armada y regresa el mejor.
+    temp_media_c y otras columnas pueden venir NULL (lugar sin geolocalizar o
+    sin clima sincronizado) — se rellenan con la mediana en vez de tirar la
+    fila, mismo criterio que ya usa el proyecto de Coffee para huecos."""
+    medianas = np.nanmedian(x_raw, axis=0)
+    inds = np.where(np.isnan(x_raw))
+    x_raw = x_raw.copy()
+    x_raw[inds] = np.take(medianas, inds[1])
+
+    scaler = StandardScaler()
+    x = scaler.fit_transform(x_raw)
+
+    cv = KFold(n_splits=min(5, n_filas), shuffle=True, random_state=42)
+    candidatos = {
+        "Lasso": LassoCV(cv=cv, random_state=42, max_iter=10000),
+        "Ridge": RidgeCV(cv=cv),
+        "ElasticNet": ElasticNetCV(cv=cv, random_state=42, max_iter=10000),
+    }
+    resultados = {}
+    for nombre, modelo in candidatos.items():
+        resultados[nombre] = mean_absolute_error(y, cross_val_predict(modelo, x, y, cv=cv))
+
+    ganador = min(resultados, key=resultados.get)
+    modelo_final = candidatos[ganador]
+    modelo_final.fit(x, y)
+    return {
+        "modelo": modelo_final, "scaler": scaler, "medianas": medianas,
+        "ganador": ganador, "mae_por_modelo": resultados, "n": n_filas,
+    }
+
+
 def entrenar(conn, incluir_amigos: bool = False):
+    """Igual que el modelo solo: uno principal con el historial del mismo
+    juego, y un fallback sin esas features para juegos nunca jugados (ver
+    duracion_solo_model.entrenar para el razonamiento completo)."""
     filas = cargar_datos(conn, incluir_amigos=incluir_amigos)
     if len(filas) < 20:
         return None
 
     y = np.array([float(f[0]) for f in filas])
-    x_raw = np.array(
+    x_completo = np.array(
         [
             fila_con_categoria(
-                [f[1], f[2], f[3], f[4], f[5], f[6], f[7], float(bool(f[8])), float(bool(f[9])), float(bool(f[10]))],
+                [f[1], f[2], f[3], f[4], f[5], f[6], f[7], float(bool(f[8])), float(bool(f[9])),
+                 float(bool(f[10])), f[14], f[15], f[16]],
                 f[11], f[12], f[13],
             )
             for f in filas
         ],
         dtype=float,
     )
-    # temp_media_c puede venir NULL (lugar sin geolocalizar o sin clima
-    # sincronizado) — se rellena con la mediana en vez de tirar la fila,
-    # mismo criterio que ya usa el proyecto de Coffee para huecos de clima
-    medianas = np.nanmedian(x_raw, axis=0)
-    inds = np.where(np.isnan(x_raw))
-    x_raw[inds] = np.take(medianas, inds[1])
+    r = _ajustar(y, x_completo, len(filas))
+    r_fallback = _ajustar(y, np.delete(x_completo, IDX_HISTORIAL, axis=1), len(filas))
 
-    scaler = StandardScaler()
-    x = scaler.fit_transform(x_raw)
-
-    cv = KFold(n_splits=min(5, len(filas)), shuffle=True, random_state=42)
-    candidatos = {
-        "Lasso": LassoCV(cv=cv, random_state=42, max_iter=10000),
-        "Ridge": RidgeCV(cv=cv),
-        "ElasticNet": ElasticNetCV(cv=cv, random_state=42, max_iter=10000),
-    }
-
-    resultados = {}
-    for nombre, modelo in candidatos.items():
-        pred = cross_val_predict(modelo, x, y, cv=cv)
-        resultados[nombre] = mean_absolute_error(y, pred)
-
-    ganador = min(resultados, key=resultados.get)
-    modelo_final = candidatos[ganador]
-    modelo_final.fit(x, y)
-
-    baseline_mae = mean_absolute_error(y, np.full_like(y, y.mean()))
-
-    return {
-        "modelo": modelo_final,
-        "scaler": scaler,
-        "medianas": medianas,
-        "ganador": ganador,
-        "mae_por_modelo": resultados,
-        "mae_baseline": baseline_mae,
-        "n": len(filas),
-        "coeficientes": dict(zip(FEATURES, getattr(modelo_final, "coef_", [None] * len(FEATURES)))),
-    }
+    r["mae_baseline"] = mean_absolute_error(y, np.full_like(y, y.mean()))
+    r["coeficientes"] = dict(zip(FEATURES, getattr(r["modelo"], "coef_", [None] * len(FEATURES))))
+    r["fallback"] = r_fallback
+    r["fallback"]["coeficientes"] = dict(
+        zip(FEATURES_SIN_HISTORIAL,
+            getattr(r_fallback["modelo"], "coef_", [None] * len(FEATURES_SIN_HISTORIAL)))
+    )
+    return r
 
 
 def predecir(
@@ -243,11 +297,17 @@ def predecir(
     if dia_semana is not None:
         for d in DIAS_SEMANA:
             valores.setdefault(f"dia_{d}", 1.0 if dia_semana == d else 0.0)
-    fila = np.array([[valores.get(f, np.nan) for f in FEATURES]], dtype=float)
+
+    sin_historial = valores.get("media_juego_propia") is None
+    r = resultado_entrenamiento["fallback"] if sin_historial else resultado_entrenamiento
+    features = FEATURES_SIN_HISTORIAL if sin_historial else FEATURES
+
+    fila = np.array([[valores.get(f, np.nan) for f in features]], dtype=float)
     inds = np.where(np.isnan(fila))
-    fila[inds] = np.take(resultado_entrenamiento["medianas"], inds[1])
-    x = resultado_entrenamiento["scaler"].transform(fila)
-    return float(resultado_entrenamiento["modelo"].predict(x)[0])
+    fila[inds] = np.take(r["medianas"], inds[1])
+    x = r["scaler"].transform(fila)
+    # piso de 5 min: un modelo lineal puede irse a ~0 o negativo en los extremos
+    return max(5.0, float(r["modelo"].predict(x)[0]))
 
 
 if __name__ == "__main__":

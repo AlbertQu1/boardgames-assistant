@@ -1197,6 +1197,38 @@ def bgstats_duracion_entrenamiento(incluir_amigos: bool = False):
 CASA_LAT, CASA_LON = 19.4371875, -99.1509375
 
 
+def historial_del_juego(cur, juego: str) -> tuple[float | None, int, float | None]:
+    """(promedio propio, num de partidas propias, promedio de amigos) para un
+    juego por nombre. Al predecir SI se usan todas las partidas propias -- el
+    leave-one-out de los modelos aplica solo al entrenar. Si nunca se jugo,
+    el promedio propio va None y predecir() cae al modelo fallback."""
+    cur.execute(
+        """
+        SELECT avg(p.duracion_min)::numeric, count(*)
+        FROM boardgames_stats.partidas p
+        JOIN boardgames_stats.juegos j ON j.uuid = p.juego_uuid
+        WHERE j.nombre = %s AND p.duracion_min > 0
+        """,
+        (juego,),
+    )
+    media_propia, n_propias = cur.fetchone()
+    cur.execute(
+        """
+        SELECT avg(pa.duracion_min)::numeric
+        FROM boardgames_bgg.plays_amigos pa
+        JOIN boardgames_stats.juegos j ON j.bgg_id = pa.bgg_game_id
+        WHERE j.nombre = %s AND pa.usable_para_analisis AND pa.duracion_min > 0
+        """,
+        (juego,),
+    )
+    media_amigos = cur.fetchone()[0]
+    return (
+        float(media_propia) if media_propia is not None else None,
+        n_propias,
+        float(media_amigos) if media_amigos is not None else None,
+    )
+
+
 def obtener_temperatura_actual() -> float | None:
     """Clima real AHORA (Open-Meteo forecast, no historico) para la prediccion
     de duracion. Si falla (API caida, timeout), regresa None y predecir_duracion
@@ -1257,6 +1289,8 @@ def bgstats_duracion_predecir(
     else:
         peso, dependencia, min_pt, max_pt, calificacion = fila
 
+    media_propia, n_propias, media_amigos = historial_del_juego(cur, juego)
+
     r = entrenar_duracion(conn, incluir_amigos=incluir_amigos)
     conn.close()
     if r is None:
@@ -1269,6 +1303,9 @@ def bgstats_duracion_predecir(
         "min_playtime": min_pt,
         "max_playtime": max_pt,
         "usa_expansion": float(usa_expansion),
+        "media_juego_propia": media_propia,
+        "n_partidas_juego": n_propias,
+        "media_juego_amigos": media_amigos,
     }
     temp_actual = obtener_temperatura_actual()
     if temp_actual is not None:
@@ -1276,10 +1313,14 @@ def bgstats_duracion_predecir(
     estimado = predecir_duracion(
         r, valores, categoria_lugar=lugar_categoria, grupo_social=grupo_social,
     )
+    usado = r["fallback"] if media_propia is None else r
     return {
         "juego": juego, "num_jugadores": num_jugadores,
         "lugar_categoria": lugar_categoria, "grupo_social": grupo_social,
-        "duracion_estimada_min": round(estimado), "mae_modelo": round(r["mae_por_modelo"][r["ganador"]], 1),
+        "duracion_estimada_min": round(estimado),
+        "mae_modelo": round(usado["mae_por_modelo"][usado["ganador"]], 1),
+        "partidas_propias_del_juego": n_propias,
+        "promedio_propio_min": round(media_propia) if media_propia is not None else None,
     }
 
 
@@ -1343,6 +1384,8 @@ def bgstats_duracion_solo_predecir(juego: str):
     else:
         peso, min_pt, max_pt, calificacion, min_j, max_j = fila
 
+    media_propia, n_propias, media_amigos = historial_del_juego(cur, juego)
+
     r = entrenar_duracion_solo(conn)
     conn.close()
     if r is None:
@@ -1354,15 +1397,21 @@ def bgstats_duracion_solo_predecir(juego: str):
         "calificacion_promedio": calificacion,
         "min_jugadores": min_j,
         "max_jugadores": max_j,
+        "media_juego_propia": media_propia,
+        "n_partidas_juego": n_propias,
+        "media_juego_amigos": media_amigos,
     }
     temp_actual = obtener_temperatura_actual()
     if temp_actual is not None:
         valores["temp_media_c"] = temp_actual
     estimado = predecir_duracion_solo(r, valores)
+    usado = r["fallback"] if media_propia is None else r
     return {
         "juego": juego,
         "duracion_estimada_min": round(estimado),
-        "mae_modelo": round(r["mae_por_modelo"][r["ganador"]], 1),
+        "mae_modelo": round(usado["mae_por_modelo"][usado["ganador"]], 1),
+        "partidas_propias_del_juego": n_propias,
+        "promedio_propio_min": round(media_propia) if media_propia is not None else None,
     }
 
 
