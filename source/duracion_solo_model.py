@@ -47,7 +47,14 @@ def cargar_datos(conn) -> list[tuple]:
     caen a la mediana como cualquier otro hueco.
 
     media_juego_amigos no necesita leave-one-out: viene de
-    boardgames_bgg.plays_amigos, que nunca es target de este modelo."""
+    boardgames_bgg.plays_amigos, que nunca es target de este modelo.
+
+    media_juego_propia usa TODAS las partidas del juego, no solo las
+    marcadas tag_solo -- se probaron ambas (sesion 2026-08-25) y filtrar a
+    solitario empeora el MAE (13.92 vs 12.65): hay mas juegos con historial
+    (215/216 filas vs 211) y el promedio es mas estable, y el modelo ya
+    aprende por su cuenta que el solitario corre mas corto. No "arreglar"
+    esto filtrando por tag_solo."""
     cur = conn.cursor()
     cur.execute(
         """
