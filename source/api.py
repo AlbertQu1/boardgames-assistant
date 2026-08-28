@@ -467,6 +467,32 @@ BGG_BATCH_DETALLE = 20  # tope de ids por llamada a thing (mismo BATCH_SIZE que 
 BGG_BUSQUEDA_CACHE_TTL = 600  # 10 min: BGG pide minimizar requests y el autocompletado dispara muchos
 _bgg_busqueda_cache: dict[str, tuple[float, list[dict]]] = {}
 
+# Los modelos de duracion se reentrenaban COMPLETOS en cada request de
+# prediccion (cargar ~1500 filas + 3 algoritmos x 5-fold CV, varios segundos
+# por request). Los datos solo cambian cuando corre el sync de BG Stats, asi
+# que se cachea el modelo entrenado y se invalida explicitamente ahi
+# (invalidar_cache_modelos). El TTL es solo red de seguridad por si algo
+# escribe en la base sin pasar por el sync.
+MODELO_CACHE_TTL = 3600  # 1 hora
+_modelo_cache: dict[str, tuple[float, dict]] = {}
+
+
+def modelo_cacheado(clave: str, entrenar_fn):
+    """Regresa el modelo entrenado, reusando el cacheado si sigue vigente."""
+    cacheado = _modelo_cache.get(clave)
+    if cacheado and time.time() - cacheado[0] < MODELO_CACHE_TTL:
+        return cacheado[1]
+    resultado = entrenar_fn()
+    if resultado is not None:
+        _modelo_cache[clave] = (time.time(), resultado)
+    return resultado
+
+
+def invalidar_cache_modelos() -> None:
+    """Se llama tras cada sync de BG Stats: los datos de entrenamiento
+    cambiaron, el modelo cacheado ya no refleja la realidad."""
+    _modelo_cache.clear()
+
 
 def _int_o_none(valor) -> int | None:
     try:
@@ -1289,7 +1315,9 @@ def bgstats_duracion_entrenamiento(incluir_amigos: bool = False):
     mejoro el modelo (MAE 16.28 sin amigos vs 16.58 con amigos, sesion 2026-08-13,
     muestra chica: ~37 de 1589 filas). Se deja el parametro por si crece la muestra."""
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
-    r = entrenar_duracion(conn, incluir_amigos=incluir_amigos)
+    r = modelo_cacheado(
+        f"duracion:{incluir_amigos}", lambda: entrenar_duracion(conn, incluir_amigos=incluir_amigos)
+    )
     conn.close()
     if r is None:
         raise HTTPException(status_code=422, detail="No hay suficientes datos para entrenar el modelo")
@@ -1404,7 +1432,9 @@ def bgstats_duracion_predecir(
 
     media_propia, n_propias, media_amigos = historial_del_juego(cur, juego)
 
-    r = entrenar_duracion(conn, incluir_amigos=incluir_amigos)
+    r = modelo_cacheado(
+        f"duracion:{incluir_amigos}", lambda: entrenar_duracion(conn, incluir_amigos=incluir_amigos)
+    )
     conn.close()
     if r is None:
         raise HTTPException(status_code=422, detail="No hay suficientes datos para entrenar el modelo")
@@ -1444,7 +1474,7 @@ def bgstats_duracion_solo_entrenamiento():
     normal, feature set mas simple (sin lugar/grupo social, casi todo solo
     es en casa)."""
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
-    r = entrenar_duracion_solo(conn)
+    r = modelo_cacheado("duracion_solo", lambda: entrenar_duracion_solo(conn))
     conn.close()
     if r is None:
         raise HTTPException(status_code=422, detail="No hay suficientes datos para entrenar el modelo")
@@ -1499,7 +1529,7 @@ def bgstats_duracion_solo_predecir(juego: str):
 
     media_propia, n_propias, media_amigos = historial_del_juego(cur, juego)
 
-    r = entrenar_duracion_solo(conn)
+    r = modelo_cacheado("duracion_solo", lambda: entrenar_duracion_solo(conn))
     conn.close()
     if r is None:
         raise HTTPException(status_code=422, detail="No hay suficientes datos para entrenar el modelo")
@@ -1710,6 +1740,8 @@ def bgstats_sync_endpoint():
         resultado["grafo_social"] = grafo_social_sync()
     except Exception as e:
         resultado["grafo_social_error"] = str(e)
+    # las partidas cambiaron -> el modelo de duracion cacheado quedo viejo
+    invalidar_cache_modelos()
     return resultado
 
 
