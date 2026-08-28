@@ -1141,6 +1141,119 @@ def bgstats_coleccion():
     }
 
 
+MI_UUID_SQL = "(SELECT uuid FROM boardgames_stats.jugadores WHERE nombre = 'Alberto Qu')"
+
+
+@app.get("/bgstats/biblioteca")
+def bgstats_biblioteca():
+    """Perfil de la biblioteca: como se reparte por peso/complejidad, como
+    cambia el juego entre solitario y multijugador, y que mecanicas domina
+    de verdad. Complementa /bgstats/coleccion, que mira lo mismo pero desde
+    el gasto (cuanto costo, donde se compro) en vez del perfil de juego.
+
+    Nacio de un analisis a mano (sesion 2026-08-27) donde mirar solo el top
+    de mas jugados daba una idea equivocada del perfil -- los fillers de 200+
+    partidas tapaban que si hay 9 juegos de peso 3+ en la coleccion."""
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+
+    # --- perfil por peso: juegos que posee + partidas + % victoria ---
+    cur.execute(
+        f"""
+        WITH juegos_propios AS (
+            SELECT DISTINCT j.uuid, j.nombre, d.peso_complejidad
+            FROM boardgames_stats.juegos j
+            JOIN boardgames_stats.colecciones c ON c.juego_uuid = j.uuid AND c.status_owned
+            JOIN boardgames_bgg.juegos_detalle d ON d.bgg_id = j.bgg_id
+            WHERE NOT j.es_expansion AND d.peso_complejidad IS NOT NULL
+        )
+        SELECT CASE WHEN jp.peso_complejidad < 1.5 THEN 'muy ligero'
+                    WHEN jp.peso_complejidad < 2.5 THEN 'ligero'
+                    WHEN jp.peso_complejidad < 3.0 THEN 'medio'
+                    WHEN jp.peso_complejidad < 3.5 THEN 'medio-pesado'
+                    ELSE 'pesado' END AS rango,
+               COUNT(DISTINCT jp.uuid) AS juegos,
+               COUNT(p.uuid) AS partidas,
+               ROUND(AVG(p.duracion_min) FILTER (WHERE p.duracion_min > 0)) AS duracion_prom,
+               ROUND(100.0 * COUNT(*) FILTER (WHERE pj.gano) / NULLIF(COUNT(pj.*), 0)) AS pct_victoria,
+               COALESCE(SUM(p.duracion_min), 0) AS minutos,
+               COALESCE(SUM(p.duracion_min) FILTER (WHERE p.tag_solo), 0) AS minutos_solo,
+               COALESCE(SUM(p.duracion_min) FILTER (WHERE NOT p.tag_solo), 0) AS minutos_multi
+        FROM juegos_propios jp
+        LEFT JOIN boardgames_stats.partidas p ON p.juego_uuid = jp.uuid AND p.duracion_min > 0
+        LEFT JOIN boardgames_stats.partida_jugadores pj
+               ON pj.partida_uuid = p.uuid AND pj.jugador_uuid = {MI_UUID_SQL}
+        GROUP BY rango
+        ORDER BY MIN(jp.peso_complejidad)
+        """
+    )
+    # Se reportan partidas Y minutos a proposito: contar partidas sobre-
+    # representa los juegos ligeros (un filler de 7 min pesa igual que un
+    # pesado de 5 horas). Medido en tiempo el perfil cambia por completo --
+    # en solitario los peso 3+ son ~45% de las horas pero solo ~25% de las
+    # partidas (observado 2026-08-27).
+    por_peso = [
+        {"rango": r[0], "juegos": r[1], "partidas": r[2],
+         "duracion_prom_min": int(r[3]) if r[3] is not None else None,
+         "pct_victoria": int(r[4]) if r[4] is not None else None,
+         "minutos": int(r[5]), "minutos_solo": int(r[6]), "minutos_multi": int(r[7])}
+        for r in cur.fetchall()
+    ]
+
+    # --- solo vs multi, por juego (solo los que tienen partidas de ambos) ---
+    cur.execute(
+        f"""
+        SELECT j.nombre, d.peso_complejidad,
+               COUNT(*) FILTER (WHERE NOT p.tag_solo) AS n_multi,
+               ROUND(AVG(p.duracion_min) FILTER (WHERE NOT p.tag_solo)) AS dur_multi,
+               ROUND(100.0 * COUNT(*) FILTER (WHERE NOT p.tag_solo AND pj.gano)
+                     / NULLIF(COUNT(*) FILTER (WHERE NOT p.tag_solo), 0)) AS pct_multi,
+               COUNT(*) FILTER (WHERE p.tag_solo) AS n_solo,
+               ROUND(AVG(p.duracion_min) FILTER (WHERE p.tag_solo)) AS dur_solo,
+               ROUND(100.0 * COUNT(*) FILTER (WHERE p.tag_solo AND pj.gano)
+                     / NULLIF(COUNT(*) FILTER (WHERE p.tag_solo), 0)) AS pct_solo
+        FROM boardgames_stats.partidas p
+        JOIN boardgames_stats.juegos j ON j.uuid = p.juego_uuid
+        LEFT JOIN boardgames_bgg.juegos_detalle d ON d.bgg_id = j.bgg_id
+        JOIN boardgames_stats.partida_jugadores pj
+             ON pj.partida_uuid = p.uuid AND pj.jugador_uuid = {MI_UUID_SQL}
+        WHERE p.duracion_min > 0
+        GROUP BY j.nombre, d.peso_complejidad
+        HAVING COUNT(*) FILTER (WHERE p.tag_solo) >= 3
+           AND COUNT(*) FILTER (WHERE NOT p.tag_solo) >= 3
+        ORDER BY COUNT(*) DESC
+        LIMIT 15
+        """
+    )
+    solo_vs_multi = [
+        {"juego": r[0], "peso": float(r[1]) if r[1] is not None else None,
+         "multi": {"partidas": r[2], "duracion_min": int(r[3]) if r[3] else None,
+                   "pct_victoria": int(r[4]) if r[4] is not None else None},
+         "solo": {"partidas": r[5], "duracion_min": int(r[6]) if r[6] else None,
+                  "pct_victoria": int(r[7]) if r[7] is not None else None}}
+        for r in cur.fetchall()
+    ]
+
+    # --- mecanicas ponderadas por partidas realmente jugadas ---
+    cur.execute(
+        """
+        SELECT unnest(d.mecanicas) AS mecanica, COUNT(*) AS partidas,
+               COUNT(DISTINCT j.uuid) AS juegos
+        FROM boardgames_stats.partidas p
+        JOIN boardgames_stats.juegos j ON j.uuid = p.juego_uuid
+        JOIN boardgames_bgg.juegos_detalle d ON d.bgg_id = j.bgg_id
+        GROUP BY mecanica
+        ORDER BY partidas DESC
+        LIMIT 12
+        """
+    )
+    mecanicas = [{"mecanica": r[0], "partidas": r[1], "juegos": r[2]} for r in cur.fetchall()]
+
+    cur.close()
+    conn.close()
+    return {"por_peso": por_peso, "solo_vs_multi": solo_vs_multi, "mecanicas": mecanicas}
+
+
 @app.get("/bgstats/duracion/juegos")
 def bgstats_duracion_juegos():
     """Juegos con datos de BGG cacheados (los unicos que se pueden predecir).

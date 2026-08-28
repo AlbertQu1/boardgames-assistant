@@ -54,7 +54,16 @@ def cargar_datos(conn) -> list[tuple]:
     solitario empeora el MAE (13.92 vs 12.65): hay mas juegos con historial
     (215/216 filas vs 211) y el promedio es mas estable, y el modelo ya
     aprende por su cuenta que el solitario corre mas corto. No "arreglar"
-    esto filtrando por tag_solo."""
+    esto filtrando por tag_solo.
+
+    Tampoco transformar el target a log ni ponderar por duracion para
+    "compensar" que la mayoria de las filas son juegos cortos (probado
+    2026-08-27): log EMPEORA los pesados 4.7x (MAE 23 -> 109 min, un error
+    chico en log se amplifica al des-transformar en el rango alto) y
+    sample_weight=duracion empeora los ligeros sin mejorar los pesados. El
+    target crudo con MAE ya es lo mejor de los tres. En terminos relativos
+    el modelo es incluso mas preciso en los pesados (23 min sobre partidas
+    de 100-340) que en los ligeros (9.8 sobre partidas de 10-40)."""
     cur = conn.cursor()
     cur.execute(
         """
