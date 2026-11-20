@@ -33,14 +33,14 @@ ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 LAT, LON = 19.4371875, -99.1509375  # mismas coords que Casa (reusadas en todo el proyecto)
 
 
-def _fetch_clima(lat: float, lon: float, fecha_min, fecha_max) -> dict:
+def _fetch_clima(lat: float, lon: float, fecha_min, fecha_max, timezone: str = "America/Mexico_City") -> dict:
     resp = requests.get(
         ARCHIVE_URL,
         params={
             "latitude": lat, "longitude": lon,
             "start_date": fecha_min.isoformat(), "end_date": fecha_max.isoformat(),
             "daily": "temperature_2m_mean,precipitation_sum",
-            "timezone": "America/Mexico_City",
+            "timezone": timezone,
         },
         timeout=30,
     )
@@ -122,6 +122,53 @@ def sync_proxy_generico() -> dict:
     return {"dias": dias, "desde": fecha_min.isoformat(), "hasta": fecha_max.isoformat()}
 
 
+def sync_externos() -> dict:
+    """Clima en la capital del estado de cada usuario externo (usuarios_externos.lat/lon),
+    para el rango real de sus partidas. Agrupa por punto: varios usuarios comparten capital
+    (ej. CDMX). Usuarios sin lat/lon (perfil sin estado) se quedan sin clima. Incremental:
+    solo pide fechas que aun no estan en clima_externos_diario."""
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT u.lat, u.lon, MIN(p.fecha), MAX(p.fecha), MAX(u.pais)
+        FROM boardgames_bgg.usuarios_externos u
+        JOIN boardgames_bgg.plays_externos p USING (bgg_username)
+        WHERE u.lat IS NOT NULL AND u.activo
+        GROUP BY u.lat, u.lon
+        """
+    )
+    puntos = cur.fetchall()
+    resultados = {}
+    for lat, lon, fecha_min, fecha_max, pais in puntos:
+        cur.execute(
+            "SELECT MIN(fecha), MAX(fecha) FROM boardgames_bgg.clima_externos_diario WHERE lat = %s AND lon = %s",
+            (lat, lon),
+        )
+        ya_min, ya_max = cur.fetchone()
+        if ya_min is not None and ya_min <= fecha_min and ya_max >= fecha_max:
+            continue
+        tz = "America/Mexico_City" if pais == "Mexico" else "auto"
+        data = _fetch_clima(lat, lon, fecha_min, fecha_max, timezone=tz)
+        for fecha, temp, precip in zip(data["time"], data["temperature_2m_mean"], data["precipitation_sum"]):
+            cur.execute(
+                """
+                INSERT INTO boardgames_bgg.clima_externos_diario (lat, lon, fecha, temp_media_c, precipitacion_mm)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (lat, lon, fecha) DO UPDATE SET
+                    temp_media_c = EXCLUDED.temp_media_c, precipitacion_mm = EXCLUDED.precipitacion_mm
+                """,
+                (lat, lon, fecha, temp, precip),
+            )
+        conn.commit()
+        resultados[f"{lat:.3f},{lon:.3f}"] = len(data["time"])
+        time.sleep(1)
+    cur.close()
+    conn.close()
+    return resultados
+
+
 if __name__ == "__main__":
     print(f"Sincronizado (por ubicacion exacta): {sync_por_ubicacion()}")
+    print(f"Sincronizado (externos, capital del estado): {sync_externos()}")
     print(f"Sincronizado (proxy generico CDMX, respaldo): {sync_proxy_generico()}")

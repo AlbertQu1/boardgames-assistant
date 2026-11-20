@@ -608,6 +608,16 @@ if __name__ == "__main__":
 
     print(f"Sincronizado (amigos BGG): {sync_todos_los_amigos()}")
 
+    print("\nActualizando partidas de usuarios BGG externos (plays_externos, solo stats/ML)...")
+    from bgg_friend_plays_sync import sync_todos_los_externos
+
+    print(f"Sincronizado (externos BGG): {sync_todos_los_externos()}")
+
+    print("\nClima de externos (capital del estado, incremental)...")
+    from bgg_friend_clima_sync import sync_externos as sync_clima_externos
+
+    print(f"Sincronizado (clima externos): {sync_clima_externos()}")
+
     print("\nActualizando grafo social (Apache AGE)...")
     from grafo_social_sync import sync as sync_grafo
 

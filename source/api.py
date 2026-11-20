@@ -62,7 +62,7 @@ from source.bgg_cache_sync import (
     parse_item as bgg_parse_item,
     guardar_detalle as bgg_guardar_detalle,
 )
-from source.bgg_friend_plays_sync import sync_todos_los_amigos
+from source.bgg_friend_plays_sync import sync_todos_los_amigos, sync_todos_los_externos
 from source.grafo_social_sync import sync as grafo_social_sync
 from source.duracion_model import entrenar as entrenar_duracion, predecir as predecir_duracion
 from source.duracion_solo_model import entrenar as entrenar_duracion_solo, predecir as predecir_duracion_solo
@@ -157,7 +157,8 @@ TOOLS = types.Tool(
                 "- boardgames_bgg.jugadores_identificados(nombre_variante — en minusculas/trim, persona_real, "
                 "grupo_social) — cruza nombres crudos de jugadores de plays_amigos con personas reales que "
                 "Alberto conoce; unir jsonb_array_elements(jugadores)->>'nombre' con LOWER(TRIM(...)) = "
-                "nombre_variante\n"
+                "nombre_variante AND (bgg_username IS NULL OR bgg_username = plays_amigos.bgg_username), "
+                "prefiriendo la fila con bgg_username (aplica solo a los logs de ese amigo)\n"
                 "- boardgames_bgg.ubicaciones_amigos_alias(ubicacion_raw, ubicacion_normalizada, categoria_lugar, "
                 "grupo_social_lugar, lat, lon) — grupo_social_lugar tiene prioridad sobre "
                 "jugadores_identificados cuando ambos aplican (ej. jugar en 'Global Excel' siempre implica "
@@ -1736,6 +1737,17 @@ def bgstats_sync_endpoint():
         resultado["amigos_bgg"] = sync_todos_los_amigos()
     except Exception as e:
         resultado["amigos_bgg_error"] = str(e)
+    try:
+        # usuarios BGG ajenos (boardgames_bgg.usuarios_externos) -- alimentan stats/ML,
+        # nunca el grafo social
+        resultado["externos_bgg"] = sync_todos_los_externos()
+    except Exception as e:
+        resultado["externos_bgg_error"] = str(e)
+    try:
+        from source.bgg_friend_clima_sync import sync_externos as sync_clima_externos
+        resultado["clima_externos"] = sync_clima_externos()
+    except Exception as e:
+        resultado["clima_externos_error"] = str(e)
     try:
         resultado["grafo_social"] = grafo_social_sync()
     except Exception as e:

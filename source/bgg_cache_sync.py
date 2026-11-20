@@ -160,6 +160,12 @@ def sync() -> dict:
         SELECT DISTINCT bgg_id FROM boardgames_stats.juegos WHERE bgg_id IS NOT NULL
         UNION
         SELECT DISTINCT bgg_game_id FROM boardgames_bgg.plays_amigos WHERE bgg_game_id IS NOT NULL
+        UNION
+        -- externos: solo los que aun no estan cacheados (son ~1.5k juegos, refrescarlos
+        -- todos en cada sync seria pedirle demasiado a BGG para metadata que casi no cambia)
+        SELECT DISTINCT bgg_game_id FROM boardgames_bgg.plays_externos
+        WHERE bgg_game_id IS NOT NULL
+          AND bgg_game_id NOT IN (SELECT bgg_id FROM boardgames_bgg.juegos_detalle)
         """
     )
     ids = [r[0] for r in cur.fetchall()]
