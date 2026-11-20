@@ -117,6 +117,7 @@ def construir_edges_propio(cur):
         FROM boardgames_stats.partida_jugadores pj
         JOIN boardgames_stats.jugadores j ON j.uuid = pj.jugador_uuid
         WHERE j.nombre NOT LIKE '%🤖%'
+          AND NOT COALESCE(j.es_anonimo, FALSE)  -- "Jugador anónimo" no es una persona
         """
     )
     partidas: dict[str, list[tuple[str, str | None]]] = {}
@@ -158,21 +159,40 @@ def construir_visitas(cur):
     return nodos, visitas
 
 
-def construir_edges_amigos(cur):
-    cur.execute("SELECT nombre_variante, persona_real, grupo_social FROM boardgames_bgg.jugadores_identificados")
-    identificados = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+# placeholders que BGG/BG Stats usan para jugadores sin nombre: no son personas, y como
+# aparecen en cientos de partidas se volvian un nodo "hub" falso que conectaba a todos
+# (decision 2026-11-20). Comparar contra el nombre en minusculas/trim.
+NOMBRES_PLACEHOLDER = {"anonymous player", "jugador anónimo", "jugador anonimo", "anonimo", "anónimo", "jugador inicial"}
 
-    cur.execute("SELECT jugadores FROM boardgames_bgg.plays_amigos WHERE usable_para_analisis")
+
+def construir_edges_amigos(cur):
+    # llave (bgg_username, nombre): bgg_username NULL = aplica a todos los logs; una fila
+    # con usuario gana sobre la global (ej. "alex" en HuroGames != "alex" en LuisRojas)
+    cur.execute("SELECT nombre_variante, persona_real, grupo_social, bgg_username FROM boardgames_bgg.jugadores_identificados")
+    identificados = {(row[3], row[0]): (row[1], row[2]) for row in cur.fetchall()}
+    personas_identificadas = {v[0] for v in identificados.values()}
+
+    cur.execute("SELECT jugadores, bgg_username FROM boardgames_bgg.plays_amigos WHERE usable_para_analisis")
     nodos: dict[str, str | None] = {}
     edges: dict[tuple[str, str], int] = {}
-    for (jugadores,) in cur.fetchall():
+    for jugadores, usuario in cur.fetchall():
         resueltos = set()
         for j in jugadores:
             nombre_crudo = (j.get("nombre") or "").strip()
             if not nombre_crudo:
                 continue
             clave = nombre_crudo.lower()
-            nombre_final, grupo = identificados.get(clave, (nombre_crudo, None))
+            if clave in NOMBRES_PLACEHOLDER:
+                continue
+            ident = identificados.get((usuario, clave)) or identificados.get((None, clave))
+            if ident:
+                nombre_final, grupo = ident
+            elif nombre_crudo in personas_identificadas:
+                # nombre sin ligar que choca con una persona ya identificada en otro log
+                # (ej. "Alex" de LuisRojas vs Alex de Cartoneros): no fusionarlos
+                nombre_final, grupo = f"{nombre_crudo} ({usuario})", None
+            else:
+                nombre_final, grupo = nombre_crudo, None
             resueltos.add(nombre_final)
             nodos[nombre_final] = grupo
         for n1, n2 in combinations(sorted(resueltos), 2):
