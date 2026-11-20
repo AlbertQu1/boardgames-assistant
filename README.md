@@ -1,11 +1,46 @@
 # boardgames-assistant
 
-RAG sobre reglamentos de juegos de mesa (PDF/DOCX → chunks → embeddings → pgvector) +
-stats de partidas (BG Stats → Postgres). Consumido por la app
+Asistente personal de juegos de mesa que corre en un servidor propio (homelab con Ubuntu).
+Responde preguntas de reglas con RAG sobre los reglamentos, analiza mi historial de partidas
+y predice cuánto va a durar una partida con un modelo de machine learning. Lo consume la app
 [Boardgames Assistant](https://github.com/AlbertQu1/Loggers/tree/master/Boardgames%20Assistant)
 (Next.js, mismo monorepo que Coffee Logger / Soda Stream Logger).
 
-Roadmap completo en la memoria del proyecto (Claude Code).
+## Resumen
+
+| | |
+|---|---|
+| **Problema** | Los reglamentos están dispersos en PDFs de varios idiomas, y mis datos de juego (BG Stats) no responden preguntas como "¿qué juego conviene para 3 personas?" o "¿cuánto nos va a durar esto?". |
+| **Stack** | Python · FastAPI · PostgreSQL 18 (pgvector + Apache AGE) · scikit-learn · Gemini (function calling) · n8n · Google Drive API · BoardGameGeek XML API · Open-Meteo · systemd |
+| **Datos** | 2,350 partidas propias de 453 juegos · 5,504 partidas de 11 amigos · 12,514 partidas de 17 usuarios externos de BGG · metadata de 2,494 juegos · 2,371 fragmentos de 35 reglamentos |
+| **Resultados** | Modelo de duración: error promedio (MAE) de **15.0 min**, contra 26.5 min de un baseline que siempre predice el promedio (−43 %). Modo solitario: 11.5 vs 25.0 min. Sync de punta a punta automatizado: exportar desde el teléfono actualiza la base, los datos de BGG, el clima, el grafo social y los modelos. |
+
+### Arquitectura
+
+```mermaid
+flowchart LR
+    BGS[BG Stats<br/>export JSON] --> DRV[Google Drive] --> N8N[n8n]
+    N8N -->|POST /bgstats/sync| API[FastAPI]
+    PDF[Reglamentos<br/>PDF/DOCX] --> PIPE[pipeline + OCR] --> VEC[(pgvector)]
+    BGG[BGG XML API<br/>amigos + externos] --> API
+    MET[Open-Meteo] --> API
+    API --> PG[(PostgreSQL<br/>stats · bgg · clima)]
+    API --> AGE[(Apache AGE<br/>grafo social)]
+    PG --> ML[scikit-learn<br/>duración]
+    APP[App Next.js] -->|/ask| LLM[Gemini + 3 tools:<br/>RAG · SQL read-only · BGG]
+    LLM --> VEC & PG
+    APP --> ML
+```
+
+### Decisiones de ingeniería que vale la pena destacar
+
+- **Evaluación honesta antes de meter más datos.** Sumar 12,514 partidas de usuarios externos parecía obvio, pero la validación cruzada (midiendo el error *solo sobre mis partidas* y recalculando el historial por juego dentro de cada fold, para no filtrar el target) mostró que **empeoraba** el modelo principal (13.4 → 15.5 min), porque otros grupos juegan más lento. Esos datos se quedaron únicamente en el modelo de respaldo para juegos nunca jugados, donde sí ayudan (21.1 → 20.5 min). Ver `source/eval_externos_duracion.py`.
+- **Separación estricta de fuentes.** Las partidas propias, las de amigos y las de desconocidos viven en tablas distintas y nunca se fusionan a nivel de tabla. Los desconocidos alimentan estadísticas y ML, pero no el grafo social.
+- **Seguridad del agente.** El LLM consulta la base con un rol de Postgres de solo lectura (`boardgames_readonly`). No puede escribir aunque genere SQL malicioso o erróneo.
+- **Calidad de datos.** Resolución de identidades entre registros de distintas personas (alias por usuario de BGG), exclusión de jugadores anónimos que antes inflaban el grafo, detección de bots/Automa y de partidas digitales, y geocodificación de lugares.
+- **Robustez operativa.** Upserts idempotentes en todos los syncs, reintentos con backoff ante el rate limit de BGG, cada paso del sync aislado para que uno que falle no tumbe al resto, y cambios de esquema versionados en `sql/`.
+
+## Detalle por fase
 
 **Estado actual:**
 - ✅ Fase 0 — pipeline de indexado (extraer → trocear → embeber → guardar en pgvector), validado con varios juegos reales, multilenguaje (es/en), OCR automatico como fallback para PDFs sin texto real, y expansiones ligadas al juego base.
@@ -17,9 +52,10 @@ Roadmap completo en la memoria del proyecto (Claude Code).
 - ✅ Fase 4 — dashboard de BG Stats en la app (`app/bg-stats`): resumen, top juegos, colección/gasto, clima, cuándo juegas (con probabilidad por día, ver abajo), top lugares con mapa.
 - ✅ Fase 5 — BGG API (mecánicas/categorías/complejidad/rating, `boardgames_bgg.juegos_detalle`, `source/bgg_cache_sync.py`) + clima real por lugar (Open-Meteo, `source/clima_sync.py`) + geocoding a mano vía Plus Codes para lugares sin coordenadas.
 - ✅ Fase 6 — analítica avanzada:
-  - **Modelo de duración** (`source/duracion_model.py`): predice `duracion_min` con peso/complejidad BGG, clima real (en vivo vía Open-Meteo para predicciones futuras), `categoria_lugar`, `grupo_social`, `tag_solo`, día de la semana. MAE ~16 min vs ~26 de baseline. Endpoint `/bgstats/duracion/predecir`, toggle en `app/ml`.
-  - **Modelo de duración en modo solitario** (`source/duracion_solo_model.py`): dataset separado (`tag_solo=true`), features más simples + `min_jugadores`/`max_jugadores` de BGG (distingue solo puro de multijugador con Automa). MAE ~13 min. Endpoint `/bgstats/duracion-solo/predecir`.
+  - **Modelo de duración** (`source/duracion_model.py`): predice `duracion_min` con peso/complejidad BGG, clima real (en vivo vía Open-Meteo para predicciones futuras), `categoria_lugar`, `grupo_social`, `tag_solo`, día de la semana e historial real del mismo juego. MAE 15.0 min vs 26.5 de baseline (2026-11-20). Para juegos nunca jugados usa un modelo de respaldo entrenado además con partidas de usuarios externos (MAE 20.5 min). Endpoint `/bgstats/duracion/predecir`, toggle en `app/ml`.
+  - **Modelo de duración en modo solitario** (`source/duracion_solo_model.py`): dataset separado (`tag_solo=true`), features más simples + `min_jugadores`/`max_jugadores` de BGG (distingue solo puro de multijugador con Automa). MAE 11.5 min vs 25.0 de baseline. Endpoint `/bgstats/duracion-solo/predecir`.
   - **Red de amigos** (`boardgames_bgg.*`): partidas que amigos con cuenta de BGG registraron directo ahí (staging propio, `source/bgg_friend_plays_sync.py`, **nunca se fusiona con `boardgames_stats.*`** — unión solo en memoria para el modelo, nunca a nivel de tabla). Detección de bots/Automa (`tag_solo`) y plataformas digitales (`tag_digital`, ej. BGA). Identidades cruzadas a mano en `boardgames_bgg.jugadores_identificados` (~125 personas), lugares en `boardgames_bgg.ubicaciones_amigos_alias`.
+  - **Usuarios externos de BGG** (`boardgames_bgg.usuarios_externos`/`plays_externos`, 2026-11-20): partidas públicas de jugadores que no conozco, con país/estado del perfil, coordenadas de la capital del estado y clima diario de ese punto. Alimentan estadísticas (temporada, número real de jugadores, popularidad) y el modelo de respaldo de duración, nunca el grafo social. Antes de dar de alta a alguien se valida que exista, que no sea ya un amigo y cuántas de sus partidas traen duración.
   - **`boardgames_bgg.juego_familia`**: agrupa ediciones/reimpresiones del mismo juego (ej. Everdell + Complete Collection) para que el historial real no se fragmente por `bgg_id`; el chat (`query_sql`) lo usa automáticamente.
   - **Grafo social** (Apache AGE, extensión sobre la misma Postgres, `source/grafo_social_sync.py`): nodos = personas (propias + identificadas de amigos + visitantes) y un nodo `Casa`; relaciones `JUEGA_CON_PROPIO`/`JUEGA_CON_AMIGOS` (separadas) y `VISITO` (persona → Casa, peso = número de visitas, desde `calendario_eventos`). Los nodos `Persona` de visitas se crean directo del nombre del evento, no solo de quien ya juega — alguien puede visitar y afectar patrones de consumo sin haber jugado nunca. Permite consultas multi-salto (quién conecta a X con Y, puentes entre redes) directo en SQL vía `cypher()`, sin motor de grafos aparte. Se actualiza en cada sync de BG Stats.
   - **Calendario + vacaciones** (`source/calendario_sync.py`): visitas (iCloud **+ `home_visits`** de la app Vacaciones, dos fuentes fusionadas) + viajes (`vacation_trips`, misma DB separada) → `boardgames_stats.calendario_eventos`, cruzable con partidas/grupo_social ("¿con quién juego cuando estoy de viaje?"). Nombres de visita que no matchean exacto contra `jugadores` se resuelven vía `boardgames_stats.visita_nombre_alias` (alias manuales que sobreviven re-syncs, mismo patrón que `jugadores_identificados` para amigos de BGG).
