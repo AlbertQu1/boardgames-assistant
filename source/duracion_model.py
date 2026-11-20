@@ -87,6 +87,13 @@ FEATURES = (
 FEATURES_HISTORIAL = ["media_juego_propia", "n_partidas_juego", "media_juego_amigos"]
 IDX_HISTORIAL = [FEATURES.index(f) for f in FEATURES_HISTORIAL]
 FEATURES_SIN_HISTORIAL = [f for f in FEATURES if f not in FEATURES_HISTORIAL]
+# El fallback (juegos que Alberto nunca ha jugado) se entrena ADEMAS con partidas de
+# usuarios BGG externos (boardgames_bgg.plays_externos), marcadas con es_externo=1 para
+# que el modelo aprenda el desfase (externos duran mas: mediana 30 vs 22 min propias).
+# Al predecir siempre va es_externo=0. Validado 2026-11-20 con CV midiendo SOLO filas
+# propias (source/eval_externos_duracion.py): juego nuevo MAE 20.84 -> 19.99. Meter los
+# externos tambien al modelo principal lo EMPEORABA (13.36 -> ~15.5), por eso solo aqui.
+FEATURES_FALLBACK = FEATURES_SIN_HISTORIAL + ["es_externo"]
 
 
 CTE_HISTORIAL = """
@@ -182,6 +189,8 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
                            FROM jsonb_array_elements(pa.jugadores) jug
                            JOIN boardgames_bgg.jugadores_identificados ji
                                ON ji.nombre_variante = LOWER(TRIM(jug->>'nombre'))
+                              AND (ji.bgg_username IS NULL OR ji.bgg_username = pa.bgg_username)
+                           ORDER BY ji.bgg_username NULLS LAST
                            LIMIT 1
                        )
                    ) AS grupo_social,
@@ -209,6 +218,38 @@ def cargar_datos(conn, incluir_amigos: bool = False) -> list[tuple]:
     return filas
 
 
+def cargar_externos(conn) -> list[tuple]:
+    """Filas de boardgames_bgg.plays_externos con el MISMO layout que cargar_datos.
+    Solo alimentan el fallback, que descarta las columnas de historial, asi que esas
+    van en NULL. Clima = capital del estado del usuario (clima_externos_diario); sin
+    grupo_social (no son del circulo de Alberto)."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT pe.duracion_min, d.peso_complejidad, d.dependencia_idioma, ce.temp_media_c,
+               d.calificacion_promedio,
+               (
+                   SELECT count(*) FROM jsonb_array_elements(pe.jugadores) jug
+                   WHERE NOT (
+                       LEFT(jug->>'nombre', 2) = 'B_' OR LOWER(jug->>'nombre') = 'automa'
+                       OR LOWER(jug->>'nombre') LIKE 'bot %%'
+                   )
+               ) AS num_jugadores,
+               d.min_playtime, d.max_playtime, COALESCE(pe.tag_digital, FALSE),
+               FALSE AS usa_expansion, COALESCE(pe.tag_solo, FALSE), pe.categoria_lugar,
+               NULL::text AS grupo_social, EXTRACT(DOW FROM pe.fecha)::int AS dia_semana,
+               NULL::numeric, NULL::numeric, NULL::numeric
+        FROM boardgames_bgg.plays_externos pe
+        JOIN boardgames_bgg.usuarios_externos u ON u.bgg_username = pe.bgg_username AND u.activo
+        JOIN boardgames_bgg.juegos_detalle d ON d.bgg_id = pe.bgg_game_id
+        LEFT JOIN boardgames_bgg.clima_externos_diario ce
+            ON ce.lat = u.lat AND ce.lon = u.lon AND ce.fecha = pe.fecha
+        WHERE pe.usable_para_analisis AND pe.duracion_min > 0 AND d.peso_complejidad IS NOT NULL
+        """
+    )
+    return cur.fetchall()
+
+
 def fila_con_categoria(
     base: list, categoria_lugar: str | None, grupo_social: str | None, dia_semana: int | None = None
 ) -> list:
@@ -218,11 +259,13 @@ def fila_con_categoria(
     return base + dummies_lugar + dummies_grupo + dummies_dia
 
 
-def _ajustar(y: np.ndarray, x_raw: np.ndarray, n_filas: int) -> dict:
+def _ajustar(y: np.ndarray, x_raw: np.ndarray, n_filas: int, mask_eval: np.ndarray | None = None) -> dict:
     """Entrena los 3 candidatos sobre una matriz ya armada y regresa el mejor.
     temp_media_c y otras columnas pueden venir NULL (lugar sin geolocalizar o
     sin clima sincronizado) — se rellenan con la mediana en vez de tirar la
-    fila, mismo criterio que ya usa el proyecto de Coffee para huecos."""
+    fila, mismo criterio que ya usa el proyecto de Coffee para huecos.
+    mask_eval: si viene, el MAE (y por lo tanto la eleccion del ganador) se mide solo
+    sobre esas filas -- el fallback entrena con externos pero se evalua en propias."""
     medianas = np.nanmedian(x_raw, axis=0)
     inds = np.where(np.isnan(x_raw))
     x_raw = x_raw.copy()
@@ -239,7 +282,11 @@ def _ajustar(y: np.ndarray, x_raw: np.ndarray, n_filas: int) -> dict:
     }
     resultados = {}
     for nombre, modelo in candidatos.items():
-        resultados[nombre] = mean_absolute_error(y, cross_val_predict(modelo, x, y, cv=cv))
+        pred = cross_val_predict(modelo, x, y, cv=cv)
+        if mask_eval is not None:
+            resultados[nombre] = mean_absolute_error(y[mask_eval], pred[mask_eval])
+        else:
+            resultados[nombre] = mean_absolute_error(y, pred)
 
     ganador = min(resultados, key=resultados.get)
     modelo_final = candidatos[ganador]
@@ -271,14 +318,44 @@ def entrenar(conn, incluir_amigos: bool = False):
         dtype=float,
     )
     r = _ajustar(y, x_completo, len(filas))
-    r_fallback = _ajustar(y, np.delete(x_completo, IDX_HISTORIAL, axis=1), len(filas))
+
+    # fallback: filas propias (es_externo=0) + externos (es_externo=1), evaluado solo en propias
+    externos = cargar_externos(conn)
+    x_fb = np.column_stack([np.delete(x_completo, IDX_HISTORIAL, axis=1), np.zeros(len(filas))])
+    y_fb = y
+    if externos:
+        x_ext = np.array(
+            [
+                fila_con_categoria(
+                    [f[1], f[2], f[3], f[4], f[5], f[6], f[7], float(bool(f[8])), float(bool(f[9])),
+                     float(bool(f[10])), np.nan, np.nan, np.nan],
+                    f[11], f[12], f[13],
+                )
+                for f in externos
+            ],
+            dtype=float,
+        )
+        x_ext = np.column_stack([np.delete(x_ext, IDX_HISTORIAL, axis=1), np.ones(len(externos))])
+        x_fb = np.vstack([x_fb, x_ext])
+        y_fb = np.concatenate([y, [float(f[0]) for f in externos]])
+    # se evalua (y se elige ganador) solo en filas propias de juegos jugados UNA vez
+    # (n_partidas_juego == 0 tras el leave-one-out): es el caso real en que se usa el
+    # fallback. Medido sobre todas las propias sale peor (16.95 -> 17.39) porque ahi
+    # el historial ya resolveria; sobre juegos nuevos mejora 21.14 -> 20.55 (2026-11-20).
+    n_hist = np.array([f[15] if f[15] is not None else 0 for f in filas], dtype=float)
+    mask_eval = np.concatenate([n_hist == 0, np.zeros(len(y_fb) - len(filas), dtype=bool)])
+    if mask_eval.sum() < 20:  # muy pocas filas para medir: usar todas las propias
+        mask_eval = np.arange(len(y_fb)) < len(filas)
+    r_fallback = _ajustar(y_fb, x_fb, len(filas), mask_eval=mask_eval)
+    r_fallback["n_eval"] = int(mask_eval.sum())
+    r_fallback["n_externos"] = len(externos)
 
     r["mae_baseline"] = mean_absolute_error(y, np.full_like(y, y.mean()))
     r["coeficientes"] = dict(zip(FEATURES, getattr(r["modelo"], "coef_", [None] * len(FEATURES))))
     r["fallback"] = r_fallback
     r["fallback"]["coeficientes"] = dict(
-        zip(FEATURES_SIN_HISTORIAL,
-            getattr(r_fallback["modelo"], "coef_", [None] * len(FEATURES_SIN_HISTORIAL)))
+        zip(FEATURES_FALLBACK,
+            getattr(r_fallback["modelo"], "coef_", [None] * len(FEATURES_FALLBACK)))
     )
     return r
 
@@ -300,7 +377,10 @@ def predecir(
 
     sin_historial = valores.get("media_juego_propia") is None
     r = resultado_entrenamiento["fallback"] if sin_historial else resultado_entrenamiento
-    features = FEATURES_SIN_HISTORIAL if sin_historial else FEATURES
+    features = FEATURES_FALLBACK if sin_historial else FEATURES
+    # SIEMPRE 0 al predecir (es una partida de Alberto). Si quedara NaN se rellenaria
+    # con la mediana del entrenamiento, que es 1 porque hay mas filas externas que propias.
+    valores["es_externo"] = 0.0
 
     fila = np.array([[valores.get(f, np.nan) for f in features]], dtype=float)
     inds = np.where(np.isnan(fila))
