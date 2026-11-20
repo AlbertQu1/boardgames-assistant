@@ -101,7 +101,16 @@ curl http://localhost:8000/reglamentos/pendientes
 python source/bgg_friend_plays_sync.py --username VINICIO
 python source/bgg_friend_plays_sync.py --todos
 
-# Cachear metadata de BGG (propios + de amigos)
+# Usuarios BGG EXTERNOS (desconocidos, sin grupo social): solo alimentan stats/ML,
+# nunca el grafo social. --agregar-externo valida en BGG, rechaza a quien ya es amigo,
+# guarda pais/estado/coords (capital del estado) y descarga sus partidas
+python source/bgg_friend_plays_sync.py --agregar-externo usuario1 usuario2
+python source/bgg_friend_plays_sync.py --externos
+
+# Clima de amigos (por lugar / proxy CDMX) y de externos (capital del estado, incremental)
+python source/bgg_friend_clima_sync.py
+
+# Cachear metadata de BGG (propios + amigos + juegos de externos aun no cacheados)
 python source/bgg_cache_sync.py
 
 # Actualizar el grafo social (Apache AGE) con el estado actual de la base
@@ -113,12 +122,25 @@ python source/calendario_sync.py
 # Probar el modelo de duracion (normal o modo solitario) suelto, sin la API
 python source/duracion_model.py
 python source/duracion_solo_model.py
+
+# Evaluar si los datos externos/amigos mejoran la prediccion (MAE solo sobre partidas propias)
+~/miniconda3/envs/boardgames/bin/python source/eval_externos_duracion.py
 ```
 
 `POST /bgstats/sync` (el que dispara n8n en cada export nuevo) encadena TODO lo anterior
-automatico: partidas/juegos/jugadores → cache BGG → partidas de amigos → grafo social
-→ calendario. Cada paso extra tiene su propio manejo de errores para no tumbar el sync
-principal si uno falla (red, API caida).
+automatico: partidas/juegos/jugadores → calendario → cache BGG → partidas de amigos →
+partidas de externos → clima de externos → grafo social. Cada paso extra tiene su propio
+manejo de errores para no tumbar el sync principal si uno falla (red, API caida). Las
+descargas de BGG reintentan con backoff si BGG responde 429/202/503 (rate limit).
+
+### Modelo de duracion y datos externos
+
+El modelo principal (juegos que ya jugaste) se entrena SOLO con partidas propias: sumar
+amigos o externos lo empeoraba (sus partidas duran mas: mediana 35 y 30 min vs 22 propias).
+El **fallback** (juegos nunca jugados) se entrena con propias + `plays_externos`, marcadas
+con `es_externo=1`; al predecir siempre va `es_externo=0`. Su MAE y la eleccion del modelo
+se miden solo en partidas propias de juegos jugados una vez (el caso real de uso):
+21.14 → 20.55 min (2026-11-20). Ver `source/eval_externos_duracion.py`.
 
 Los reglamentos (PDF/DOCX) no se versionan (`.gitignore`) por derechos de autor —
 van en `pdfs_prueba/` localmente. El export de BG Stats (`bgstats_data/`) tampoco se
@@ -144,7 +166,18 @@ de TODOS los juegos, propios y de amigos), `plays_amigos` (staging de amigos, nu
 fusiona con `boardgames_stats.*`), `jugadores_identificados`, `ubicaciones_amigos_alias`,
 `clima_ubicacion_diario`/`clima_cdmx_diario`, `juego_familia`, `amigos_nuevos_pendientes`
 (badge).
+- `jugadores_identificados.bgg_username`: opcional. NULL = el alias aplica a los logs de
+  todos los amigos; con valor = solo a los `plays_amigos` de ese usuario y gana sobre la
+  fila global (ej. "alex" en un log es una persona y en otro log es otra).
+- `usuarios_externos` (lista de usuarios BGG ajenos + `pais`/`estado`/`lat`/`lon` de la
+  capital del estado; BGG no expone ciudad), `plays_externos` (mismo layout que
+  `plays_amigos`), `clima_externos_diario` (clima por punto lat/lon + fecha).
 
 **`red_social`** (Apache AGE) — grafo de personas + nodo `Casa` + relaciones `JUEGA_CON_PROPIO`/
 `JUEGA_CON_AMIGOS`/`VISITO`. Requiere `LOAD 'age'; SET search_path = ag_catalog, "$user", public;`
-antes de usar `cypher()`. Ver `source/grafo_social_sync.py`.
+antes de usar `cypher()`. Ver `source/grafo_social_sync.py`. Los nombres de relleno
+("Anonymous player", "Jugador anónimo", "jugador Inicial"...) y los jugadores `es_anonimo`
+no generan nodos; un nombre sin ligar que choca con una persona ya identificada se guarda
+como "Nombre (usuario_bgg)". Los externos nunca entran al grafo.
+
+Cambios de esquema fechados en `sql/` (se aplicaron a mano en la base `casa`).
